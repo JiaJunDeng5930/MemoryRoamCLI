@@ -94,3 +94,14 @@ fn cli_update_accepts_single_line_stdin_with_trailing_newline() {
         .success()
         .stdout(predicate::str::contains("Content: Updated from stdin"));
 }
+
+#[test]
+fn cli_read_requires_initialized_schema() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+
+    command(&temp_dir)
+        .args(["read", "--id", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported schema version"));
+}

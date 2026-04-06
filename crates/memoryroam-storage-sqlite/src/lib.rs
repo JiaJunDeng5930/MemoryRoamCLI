@@ -175,10 +175,12 @@ impl SqliteStore {
 
 impl ReadRepository for SqliteStore {
     fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+        ensure_schema_initialized(&self.connection)?;
         fetch_node(&self.connection, node_id)
     }
 
     fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+        ensure_schema_initialized(&self.connection)?;
         let start = match parent_id {
             Some(parent_id) => {
                 let parent =
@@ -195,6 +197,7 @@ impl ReadRepository for SqliteStore {
     }
 
     fn list_incoming_links(&self, node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+        ensure_schema_initialized(&self.connection)?;
         let mut statement = self
             .connection
             .prepare(
@@ -230,6 +233,7 @@ impl ReadRepository for SqliteStore {
     }
 
     fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+        ensure_schema_initialized(&self.connection)?;
         let mut statement = self
             .connection
             .prepare(
@@ -260,6 +264,7 @@ impl ReadRepository for SqliteStore {
         &self,
         node_ids: &BTreeSet<NodeId>,
     ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+        ensure_schema_initialized(&self.connection)?;
         let mut contents = BTreeMap::new();
         for node_id in node_ids {
             if let Some(node) = self.get_node(*node_id)? {
@@ -270,6 +275,7 @@ impl ReadRepository for SqliteStore {
     }
 
     fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+        ensure_schema_initialized(&self.connection)?;
         let mut statement = self
             .connection
             .prepare(
@@ -301,6 +307,7 @@ impl ReadRepository for SqliteStore {
     }
 
     fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+        ensure_schema_initialized(&self.connection)?;
         let mut segments = Vec::new();
         let mut current = Some(node_id);
 
