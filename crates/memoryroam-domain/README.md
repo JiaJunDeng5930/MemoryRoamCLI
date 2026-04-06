@@ -21,11 +21,11 @@ This crate does not own command parsing, database I/O, or text output formatting
 use memoryroam_domain::{ContentLine, LookupKey, NodeId};
 
 let node_id = NodeId::new(42)?;
-let content = ContentLine::parse("See {{42}}")?;
+let content = ContentLine::parse("Topic")?;
 let key = LookupKey::from_content(&content)?;
 
 assert_eq!(node_id.value(), 42);
-assert_eq!(key.as_str(), "See {{42}}");
+assert_eq!(key.as_str(), "Topic");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -33,7 +33,7 @@ assert_eq!(key.as_str(), "See {{42}}");
 
 - `NodeId`: positive, externally visible note ID.
 - `ContentLine`: validated single-line node content.
-- `LookupKey`: trimmed lookup key used for content and aliases.
+- `LookupKey`: trimmed lookup key used for content and aliases, excluding purely numeric and reserved-syntax values.
 - `parse_content`: parser for `{{...}}` link syntax.
 - `canonicalize_content`: rewrite lookup links into canonical ID-bound storage form.
 - `render_storage_content`: render stored content for display-time output.
@@ -48,6 +48,6 @@ assert_eq!(key.as_str(), "See {{42}}");
 
 ## Notes
 
-- Lookup normalization is trim-only.
+- Lookup normalization trims surrounding whitespace and rejects purely numeric or reserved-syntax values.
 - Rendering rejects unresolved lookup tokens in stored content.
 - Rendering expands unlabeled links and escapes nested previews so the output remains valid MemoryRoam text.

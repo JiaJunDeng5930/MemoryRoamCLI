@@ -141,7 +141,7 @@ impl DisplayLabel {
     }
 }
 
-/// Trim-normalized lookup key used for content and aliases.
+/// Trim-normalized lookup key used for user-entered lookups and aliases.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LookupKey(String);
 
@@ -150,7 +150,8 @@ impl LookupKey {
     ///
     /// # Errors
     ///
-    /// Returns [`TextValueError`] when the normalized key is empty or multi-line.
+    /// Returns [`TextValueError`] when the normalized key is empty, multi-line, purely numeric,
+    /// or collides with reserved link syntax.
     pub fn new(value: impl Into<String>) -> Result<Self, TextValueError> {
         let value = value.into();
         if value.contains('\n') || value.contains('\r') {
@@ -162,10 +163,18 @@ impl LookupKey {
             return Err(TextValueError::Empty);
         }
 
+        if trimmed.chars().all(|character| character.is_ascii_digit()) {
+            return Err(TextValueError::ReservedLookupSyntax);
+        }
+
+        if trimmed.contains("{{") || trimmed.contains("}}") || trimmed.contains("::") {
+            return Err(TextValueError::ReservedLookupSyntax);
+        }
+
         Ok(Self(trimmed.to_owned()))
     }
 
-    /// Derives a lookup key from canonical stored content.
+    /// Derives a user-entered lookup key from node content.
     pub fn from_content(content: &ContentLine) -> Result<Self, TextValueError> {
         Self::new(content.as_str())
     }
@@ -179,6 +188,10 @@ impl LookupKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    fn from_content_for_storage(content: &ContentLine) -> Self {
+        Self(content.as_str().trim().to_owned())
+    }
 }
 
 /// Validation failures shared by content, alias, display label, and lookup key constructors.
@@ -188,6 +201,8 @@ pub enum TextValueError {
     Empty,
     #[error("text value must stay on one line")]
     Multiline,
+    #[error("text value collides with reserved lookup syntax")]
+    ReservedLookupSyntax,
 }
 
 fn validate_single_line(value: &str) -> Result<(), TextValueError> {
@@ -317,7 +332,7 @@ pub enum ParsedLink {
     ById(NodeId),
     ByLookup(String),
     ByIdWithLabel(NodeId, DisplayLabel),
-    ByNumericToken { node_id: NodeId, raw: String },
+    ByNumericToken(NodeId),
 }
 
 /// Parsing failure for `{{...}}` link syntax.
@@ -445,10 +460,7 @@ fn parse_link(token: &str) -> Result<ParsedLink, ParseError> {
 
     if token.chars().all(|character| character.is_ascii_digit()) {
         let node_id = parse_node_id_token(token)?;
-        return Ok(ParsedLink::ByNumericToken {
-            node_id,
-            raw: token.to_owned(),
-        });
+        return Ok(ParsedLink::ByNumericToken(node_id));
     }
 
     Ok(ParsedLink::ByLookup(token.to_owned()))
@@ -488,39 +500,10 @@ pub fn canonicalize_content<R: ReadRepository>(
                     outgoing_links.push(node_id);
                     stored.push_str(&format!("{{{{{node_id}::{}}}}}", label.as_str()));
                 }
-                ParsedLink::ByNumericToken { node_id, raw } => {
-                    if repository.node_exists(node_id)? {
-                        outgoing_links.push(node_id);
-                        stored.push_str(&format!("{{{{{node_id}}}}}"));
-                    } else {
-                        let lookup_key = LookupKey::new(raw)
-                            .map_err(|error| KernelError::Input(error.to_string()))?;
-                        let mut candidates = repository.lookup_candidates(&lookup_key)?;
-                        if candidates.is_empty() {
-                            return Err(KernelError::NotFound {
-                                entity: "node",
-                                id: node_id,
-                            });
-                        }
-
-                        if candidates.len() > 1 {
-                            candidates.sort_by_key(|candidate| candidate.node_id);
-                            return Err(KernelError::LookupAmbiguous {
-                                lookup: lookup_key.as_str().to_owned(),
-                                candidates,
-                            });
-                        }
-
-                        let candidate = candidates
-                            .pop()
-                            .expect("non-empty candidates should have one element");
-                        outgoing_links.push(candidate.node_id);
-                        stored.push_str(&format!(
-                            "{{{{{}::{}}}}}",
-                            candidate.node_id,
-                            lookup_key.as_str()
-                        ));
-                    }
+                ParsedLink::ByNumericToken(node_id) => {
+                    ensure_node_exists(repository, node_id)?;
+                    outgoing_links.push(node_id);
+                    stored.push_str(&format!("{{{{{node_id}}}}}"));
                 }
                 ParsedLink::ByLookup(raw_lookup) => {
                     let lookup_key = LookupKey::new(raw_lookup)
@@ -559,8 +542,7 @@ pub fn canonicalize_content<R: ReadRepository>(
     })?;
 
     Ok(CanonicalizedContent {
-        lookup_key: LookupKey::from_content(&stored_content)
-            .map_err(|error| KernelError::StorageCorruption(error.to_string()))?,
+        lookup_key: LookupKey::from_content_for_storage(&stored_content),
         content: stored_content,
         outgoing_links,
     })
@@ -605,7 +587,7 @@ fn render_storage_content_internal<R: ReadRepository>(
                 }
                 rendered.push_str(&format!("{{{{{node_id}::{}}}}}", label.as_str()));
             }
-            ContentFragment::Link(ParsedLink::ByNumericToken { node_id, .. }) => {
+            ContentFragment::Link(ParsedLink::ByNumericToken(node_id)) => {
                 let preview = render_link_preview(repository, node_id, active_render_stack)?;
                 rendered.push_str(&format!("{{{{{node_id}::{preview}}}}}"));
             }
@@ -826,6 +808,21 @@ mod tests {
     }
 
     #[test]
+    fn lookup_key_rejects_numeric_values() {
+        let error = LookupKey::new("123").expect_err("numeric lookup keys should fail");
+
+        assert_eq!(error, TextValueError::ReservedLookupSyntax);
+    }
+
+    #[test]
+    fn lookup_key_rejects_reserved_link_syntax() {
+        for value in ["bad}}alias", "1::foo", "{{topic}}"] {
+            let error = LookupKey::new(value).expect_err("reserved syntax should fail");
+            assert_eq!(error, TextValueError::ReservedLookupSyntax);
+        }
+    }
+
+    #[test]
     fn parse_content_detects_all_supported_link_shapes() {
         let content = ContentLine::parse("A {{42}} B {{topic}} C {{7::label}}")
             .expect("content should parse");
@@ -835,10 +832,9 @@ mod tests {
             fragments,
             vec![
                 ContentFragment::Text("A ".to_owned()),
-                ContentFragment::Link(ParsedLink::ByNumericToken {
-                    node_id: NodeId::new(42).expect("valid test id"),
-                    raw: String::from("42"),
-                }),
+                ContentFragment::Link(ParsedLink::ByNumericToken(
+                    NodeId::new(42).expect("valid test id"),
+                )),
                 ContentFragment::Text(" B ".to_owned()),
                 ContentFragment::Link(ParsedLink::ByLookup("topic".to_owned())),
                 ContentFragment::Text(" C ".to_owned()),
@@ -884,18 +880,20 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_content_falls_back_to_numeric_lookup_when_id_is_missing() {
-        let repository = FakeRepository::new(&[(1, "Anchor")]).with_aliases(&[("123", &[1])]);
+    fn canonicalize_content_rejects_missing_numeric_id_links() {
+        let repository = FakeRepository::new(&[(1, "Anchor")]);
         let content = ContentLine::parse("See {{123}}").expect("content should parse");
 
-        let canonical = canonicalize_content(&repository, &content)
-            .expect("numeric lookup should resolve when matching id is absent");
+        let error = canonicalize_content(&repository, &content)
+            .expect_err("numeric tokens should be treated as ids only");
 
-        assert_eq!(canonical.content.as_str(), "See {{1::123}}");
-        assert_eq!(
-            canonical.outgoing_links,
-            vec![NodeId::new(1).expect("valid test id")]
-        );
+        assert!(matches!(
+            error,
+            KernelError::NotFound {
+                entity: "node",
+                id
+            } if id == NodeId::new(123).expect("valid test id")
+        ));
     }
 
     #[test]
