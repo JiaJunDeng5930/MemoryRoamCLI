@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use memoryroam_domain::{
     AliasText, CanonicalizedContent, ContentLine, DeleteMode, KernelError, KernelResult, LookupKey,
-    NewNodeRecord, NodeId, Placement, WriteRepository, canonicalize_content,
+    NodeId, Placement, WriteRepository, canonicalize_content,
 };
 
 pub fn init<R: WriteRepository>(repository: &mut R) -> KernelResult<()> {
@@ -40,57 +40,7 @@ pub fn create_nodes<R: WriteRepository>(
         .map(|value| AliasText::new(value.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| KernelError::Input(error.to_string()))?;
-    let mut created_ids = Vec::with_capacity(lines.len());
-    let mut next_placement = placement;
-
-    for (index, content) in lines.into_iter().enumerate() {
-        let canonical = match canonicalize_content(repository, &content) {
-            Ok(canonical) => canonical,
-            Err(error) => {
-                rollback_created_nodes(repository, &created_ids)?;
-                return Err(error);
-            }
-        };
-        let new_node = NewNodeRecord {
-            content: canonical.content,
-            lookup_key: canonical.lookup_key,
-            outgoing_links: canonical.outgoing_links,
-            aliases: if index == 0 {
-                aliases.clone()
-            } else {
-                Vec::new()
-            },
-        };
-
-        let node_id = match repository.create_nodes(next_placement, &[new_node]) {
-            Ok(node_ids) => node_ids.into_iter().next().ok_or_else(|| {
-                KernelError::Storage(String::from("repository did not return a node id"))
-            }),
-            Err(error) => {
-                rollback_created_nodes(repository, &created_ids)?;
-                return Err(error);
-            }
-        }?;
-        created_ids.push(node_id);
-        next_placement = Placement::After(node_id);
-    }
-
-    Ok(created_ids)
-}
-
-fn rollback_created_nodes<R: WriteRepository>(
-    repository: &mut R,
-    created_ids: &[NodeId],
-) -> KernelResult<()> {
-    for node_id in created_ids.iter().rev().copied() {
-        if let Err(rollback_error) = repository.delete_node(node_id, DeleteMode::Cascade) {
-            return Err(KernelError::Storage(format!(
-                "create rollback failed for node {node_id}: {rollback_error}"
-            )));
-        }
-    }
-
-    Ok(())
+    repository.create_nodes_from_lines(placement, &lines, &aliases)
 }
 
 pub fn update_node<R: WriteRepository>(
@@ -200,7 +150,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use memoryroam_domain::{LookupCandidate, ReadRepository, StoredNode};
+    use memoryroam_domain::{LookupCandidate, NewNodeRecord, ReadRepository, StoredNode};
 
     #[derive(Default)]
     struct FakeRepository {
