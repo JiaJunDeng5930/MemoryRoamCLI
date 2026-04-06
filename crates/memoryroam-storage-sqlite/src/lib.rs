@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+#![deny(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::private_intra_doc_links)]
+#![doc = include_str!("../README.md")]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
@@ -150,6 +153,7 @@ END;
 PRAGMA user_version = 1;
 "#;
 
+/// SQLite-backed repository implementation for MemoryRoam.
 #[derive(Debug)]
 pub struct SqliteStore {
     database_path: PathBuf,
@@ -157,6 +161,7 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// Opens a database file and allows SQLite to create it if it does not exist.
     pub fn open_or_create(database_path: impl AsRef<Path>) -> KernelResult<Self> {
         let database_path = database_path.as_ref().to_path_buf();
         let connection = Connection::open(&database_path).map_err(map_sqlite_error)?;
@@ -170,6 +175,7 @@ impl SqliteStore {
         })
     }
 
+    /// Opens an already-existing database file without creating a new one.
     pub fn open_existing(database_path: impl AsRef<Path>) -> KernelResult<Self> {
         let database_path = database_path.as_ref().to_path_buf();
         let connection =
@@ -185,6 +191,7 @@ impl SqliteStore {
         })
     }
 
+    /// Returns the on-disk database path associated with this handle.
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }

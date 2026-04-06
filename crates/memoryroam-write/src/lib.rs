@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+#![deny(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::private_intra_doc_links)]
+#![doc = include_str!("../README.md")]
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -7,10 +10,12 @@ use memoryroam_domain::{
     NodeId, Placement, WriteRepository, canonicalize_content,
 };
 
+/// Initializes the target repository schema.
 pub fn init<R: WriteRepository>(repository: &mut R) -> KernelResult<()> {
     repository.init_schema()
 }
 
+/// Validates user create input and delegates atomic creation to the storage backend.
 pub fn create_nodes<R: WriteRepository>(
     repository: &mut R,
     raw_input: &str,
@@ -43,6 +48,7 @@ pub fn create_nodes<R: WriteRepository>(
     repository.create_nodes_from_lines(placement, &lines, &aliases)
 }
 
+/// Validates and canonicalizes one node update.
 pub fn update_node<R: WriteRepository>(
     repository: &mut R,
     node_id: NodeId,
@@ -94,6 +100,7 @@ fn ensure_no_link_cycle<R: WriteRepository>(
     Ok(())
 }
 
+/// Delegates a move operation to the storage backend.
 pub fn move_node<R: WriteRepository>(
     repository: &mut R,
     node_id: NodeId,
@@ -102,6 +109,7 @@ pub fn move_node<R: WriteRepository>(
     repository.move_node(node_id, placement)
 }
 
+/// Delegates a delete operation to the storage backend.
 pub fn delete_node<R: WriteRepository>(
     repository: &mut R,
     node_id: NodeId,
@@ -110,6 +118,7 @@ pub fn delete_node<R: WriteRepository>(
     repository.delete_node(node_id, mode)
 }
 
+/// Validates alias input and adds aliases to one node.
 pub fn add_aliases<R: WriteRepository>(
     repository: &mut R,
     node_id: NodeId,
@@ -130,6 +139,7 @@ pub fn add_aliases<R: WriteRepository>(
     repository.add_aliases(node_id, &aliases)
 }
 
+/// Validates alias input and removes one alias from one node.
 pub fn remove_alias<R: WriteRepository>(
     repository: &mut R,
     node_id: NodeId,
@@ -141,6 +151,7 @@ pub fn remove_alias<R: WriteRepository>(
     repository.remove_alias(node_id, &alias)
 }
 
+/// Builds a normalized lookup key from raw user input.
 pub fn create_lookup_key(raw_value: &str) -> KernelResult<LookupKey> {
     LookupKey::new(raw_value.to_owned()).map_err(|error| KernelError::Input(error.to_string()))
 }

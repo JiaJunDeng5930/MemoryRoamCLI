@@ -28,19 +28,19 @@ Check whether the embedded project index is current with `cargo xtask agents-md-
 |IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning for repository-specific behavior, structure, and APIs.
 |exclude_dirs:{.git,.next,.mypy_cache,.pytest_cache,.venv,.workpad,__pycache__,build,coverage,dist,node_modules,target,venv}
 |exclude_files:{.env,.env.*,*.key,*.p12,*.pem,*.pfx,id_ed25519*,id_rsa*}
-|.:{.cargo/,.gitignore,.pre-commit-config.yaml,AGENTS.md,Cargo.lock,Cargo.toml,crates/,rust-toolchain.toml,xtask/}
+|.:{.cargo/,.gitignore,.pre-commit-config.yaml,AGENTS.md,Cargo.lock,Cargo.toml,README.md,crates/,rust-toolchain.toml,xtask/}
 |.cargo:{config.toml}
 |crates:{memoryroam-cli/,memoryroam-domain/,memoryroam-read/,memoryroam-storage-sqlite/,memoryroam-write/}
-|crates/memoryroam-cli:{Cargo.toml,src/,tests/}
+|crates/memoryroam-cli:{Cargo.toml,README.md,src/,tests/}
 |crates/memoryroam-cli/src:{main.rs}
 |crates/memoryroam-cli/tests:{cli.rs}
-|crates/memoryroam-domain:{Cargo.toml,src/}
+|crates/memoryroam-domain:{Cargo.toml,README.md,src/}
 |crates/memoryroam-domain/src:{lib.rs}
-|crates/memoryroam-read:{Cargo.toml,src/}
+|crates/memoryroam-read:{Cargo.toml,README.md,src/}
 |crates/memoryroam-read/src:{lib.rs}
-|crates/memoryroam-storage-sqlite:{Cargo.toml,src/}
+|crates/memoryroam-storage-sqlite:{Cargo.toml,README.md,src/}
 |crates/memoryroam-storage-sqlite/src:{lib.rs}
-|crates/memoryroam-write:{Cargo.toml,src/}
+|crates/memoryroam-write:{Cargo.toml,README.md,src/}
 |crates/memoryroam-write/src:{lib.rs}
 |xtask:{Cargo.toml,src/}
 |xtask/src:{main.rs}

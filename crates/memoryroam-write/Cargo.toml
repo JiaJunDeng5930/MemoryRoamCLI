@@ -2,6 +2,9 @@
 name = "memoryroam-write"
 version = "0.1.0"
 edition = "2024"
+description = "Write-side use cases and validation for MemoryRoam."
+readme = "README.md"
+repository = "https://github.com/JiaJunDeng5930/MemoryRoamCLI"
 
 [dependencies]
 memoryroam-domain = { path = "../memoryroam-domain" }

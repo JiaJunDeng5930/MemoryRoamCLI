@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+#![deny(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::private_intra_doc_links)]
+#![doc = include_str!("../README.md")]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
@@ -6,8 +9,10 @@ use std::num::NonZeroI64;
 
 use thiserror::Error;
 
+/// Shared result alias for domain-facing operations.
 pub type KernelResult<T> = Result<T, KernelError>;
 
+/// Error type shared across parsing, read, write, and storage boundaries.
 #[derive(Debug, Error)]
 pub enum KernelError {
     #[error("{0}")]
@@ -31,16 +36,23 @@ pub enum KernelError {
     Storage(String),
 }
 
+/// Stable positive node identifier exposed to CLI users and stored in links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(NonZeroI64);
 
 impl NodeId {
+    /// Builds a node ID from a positive integer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NodeIdError::NotPositive`] when `value <= 0`.
     pub fn new(value: i64) -> Result<Self, NodeIdError> {
         NonZeroI64::new(value)
             .map(Self)
             .ok_or(NodeIdError::NotPositive)
     }
 
+    /// Returns the raw integer value used in SQLite and the CLI.
     pub const fn value(self) -> i64 {
         self.0.get()
     }
@@ -60,61 +72,81 @@ impl Display for NodeId {
     }
 }
 
+/// Error returned when a raw integer cannot become a [`NodeId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum NodeIdError {
     #[error("node id must be positive")]
     NotPositive,
 }
 
+/// Validated single-line node content stored in `nodes.content`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentLine(String);
 
 impl ContentLine {
+    /// Parses one logical note line.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TextValueError`] when the text is empty after trimming or contains a line break.
     pub fn parse(value: impl Into<String>) -> Result<Self, TextValueError> {
         let value = value.into();
         validate_single_line(&value)?;
         Ok(Self(value))
     }
 
+    /// Borrows the validated content as `&str`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// Alias text as entered and stored for one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasText(String);
 
 impl AliasText {
+    /// Builds validated alias text.
     pub fn new(value: impl Into<String>) -> Result<Self, TextValueError> {
         let value = value.into();
         validate_single_line(&value)?;
         Ok(Self(value))
     }
 
+    /// Borrows the validated alias text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// One rendered label attached to a specific link occurrence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayLabel(String);
 
 impl DisplayLabel {
+    /// Builds validated link display text.
     pub fn new(value: impl Into<String>) -> Result<Self, TextValueError> {
         let value = value.into();
         validate_single_line(&value)?;
         Ok(Self(value))
     }
 
+    /// Borrows the validated display label.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// Trim-normalized lookup key used for content and aliases.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LookupKey(String);
 
 impl LookupKey {
+    /// Builds a lookup key by trimming surrounding whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TextValueError`] when the normalized key is empty or multi-line.
     pub fn new(value: impl Into<String>) -> Result<Self, TextValueError> {
         let value = value.into();
         if value.contains('\n') || value.contains('\r') {
@@ -129,19 +161,23 @@ impl LookupKey {
         Ok(Self(trimmed.to_owned()))
     }
 
+    /// Derives a lookup key from canonical stored content.
     pub fn from_content(content: &ContentLine) -> Result<Self, TextValueError> {
         Self::new(content.as_str())
     }
 
+    /// Derives a lookup key from alias text.
     pub fn from_alias(alias: &AliasText) -> Result<Self, TextValueError> {
         Self::new(alias.as_str())
     }
 
+    /// Borrows the normalized lookup key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// Validation failures shared by content, alias, display label, and lookup key constructors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum TextValueError {
     #[error("text value cannot be empty")]
@@ -162,6 +198,7 @@ fn validate_single_line(value: &str) -> Result<(), TextValueError> {
     Ok(())
 }
 
+/// Stored node snapshot returned by repository implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredNode {
     pub id: NodeId,
@@ -173,6 +210,7 @@ pub struct StoredNode {
     pub next_sibling_id: Option<NodeId>,
 }
 
+/// One lookup candidate shown when lookup resolution is ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupCandidate {
     pub node_id: NodeId,
@@ -180,6 +218,7 @@ pub struct LookupCandidate {
     pub path: String,
 }
 
+/// One incoming-link occurrence returned by storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncomingLinkRecord {
     pub source_node_id: NodeId,
@@ -188,12 +227,14 @@ pub struct IncomingLinkRecord {
     pub path: String,
 }
 
+/// Minimal rendered node line used in CLI lists and structure context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeLine {
     pub id: NodeId,
     pub rendered_content: String,
 }
 
+/// Rendered incoming-link view returned by the read layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncomingLinkView {
     pub source: NodeLine,
@@ -201,6 +242,7 @@ pub struct IncomingLinkView {
     pub path: String,
 }
 
+/// Full rendered read model for one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadNodeView {
     pub node: NodeLine,
@@ -211,6 +253,7 @@ pub struct ReadNodeView {
     pub incoming_links: Vec<IncomingLinkView>,
 }
 
+/// Canonicalized content ready for persistence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalizedContent {
     pub content: ContentLine,
@@ -218,6 +261,7 @@ pub struct CanonicalizedContent {
     pub outgoing_links: Vec<NodeId>,
 }
 
+/// One validated node creation payload ready for storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewNodeRecord {
     pub content: ContentLine,
@@ -226,6 +270,7 @@ pub struct NewNodeRecord {
     pub aliases: Vec<AliasText>,
 }
 
+/// Placement target used by create, move, and delete-reparent operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     TopLevelFirst,
@@ -237,6 +282,7 @@ pub enum Placement {
 }
 
 impl Placement {
+    /// Returns the explicit target node, if this placement points at one.
     pub const fn target_id(self) -> Option<NodeId> {
         match self {
             Self::TopLevelFirst | Self::TopLevelLast => None,
@@ -247,18 +293,21 @@ impl Placement {
     }
 }
 
+/// Delete behavior for one node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteMode {
     Cascade,
     Reparent(Placement),
 }
 
+/// One parsed content fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentFragment {
     Text(String),
     Link(ParsedLink),
 }
 
+/// Parsed link syntax before storage canonicalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedLink {
     ById(NodeId),
@@ -267,6 +316,7 @@ pub enum ParsedLink {
     ByNumericToken { node_id: NodeId, raw: String },
 }
 
+/// Parsing failure for `{{...}}` link syntax.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ParseError {
     #[error("link token is empty")]
@@ -277,37 +327,52 @@ pub enum ParseError {
     InvalidToken(String),
 }
 
+/// Read-side repository contract implemented by storage backends.
 pub trait ReadRepository {
+    /// Loads one stored node snapshot by ID.
     fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>>;
+    /// Lists direct children for one parent, or top-level nodes when `parent_id` is `None`.
     fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>>;
+    /// Lists direct outgoing link targets for one source node in occurrence order.
     fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>>;
+    /// Lists incoming link occurrences for one target node.
     fn list_incoming_links(&self, node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>>;
+    /// Lists aliases attached to one node.
     fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>>;
+    /// Loads content for the requested node IDs.
     fn fetch_node_contents(
         &self,
         node_ids: &BTreeSet<NodeId>,
     ) -> KernelResult<BTreeMap<NodeId, ContentLine>>;
+    /// Resolves a normalized lookup key to zero, one, or many candidates.
     fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>>;
+    /// Returns the rendered breadcrumb path for one node.
     fn node_path(&self, node_id: NodeId) -> KernelResult<String>;
 
+    /// Returns whether the given node currently exists.
     fn node_exists(&self, node_id: NodeId) -> KernelResult<bool> {
         self.get_node(node_id).map(|node| node.is_some())
     }
 }
 
+/// Write-side repository contract implemented by mutable storage backends.
 pub trait WriteRepository: ReadRepository {
+    /// Creates schema objects in an empty or partially initialized database.
     fn init_schema(&mut self) -> KernelResult<()>;
+    /// Atomically creates one or more lines from user input in a single write operation.
     fn create_nodes_from_lines(
         &mut self,
         placement: Placement,
         lines: &[ContentLine],
         aliases: &[AliasText],
     ) -> KernelResult<Vec<NodeId>>;
+    /// Persists already-canonicalized node payloads.
     fn create_nodes(
         &mut self,
         placement: Placement,
         nodes: &[NewNodeRecord],
     ) -> KernelResult<Vec<NodeId>>;
+    /// Replaces one node's canonical content and outgoing links.
     fn update_node_content(
         &mut self,
         node_id: NodeId,
@@ -315,12 +380,17 @@ pub trait WriteRepository: ReadRepository {
         lookup_key: &LookupKey,
         outgoing_links: &[NodeId],
     ) -> KernelResult<()>;
+    /// Moves one existing node or subtree to a new placement.
     fn move_node(&mut self, node_id: NodeId, placement: Placement) -> KernelResult<()>;
+    /// Deletes one node using the requested mode.
     fn delete_node(&mut self, node_id: NodeId, mode: DeleteMode) -> KernelResult<()>;
+    /// Adds aliases to one node.
     fn add_aliases(&mut self, node_id: NodeId, aliases: &[AliasText]) -> KernelResult<()>;
+    /// Removes one alias from one node.
     fn remove_alias(&mut self, node_id: NodeId, alias: &AliasText) -> KernelResult<()>;
 }
 
+/// Parses a validated content line into plain-text and link fragments.
 pub fn parse_content(content: &ContentLine) -> Result<Vec<ContentFragment>, ParseError> {
     parse_content_str(content.as_str())
 }
@@ -387,6 +457,11 @@ fn parse_node_id_token(token: &str) -> Result<NodeId, ParseError> {
     NodeId::new(value).map_err(|_| ParseError::InvalidToken(token.to_owned()))
 }
 
+/// Canonicalizes stored content by resolving lookup links to stable node IDs.
+///
+/// # Errors
+///
+/// Returns [`KernelError`] when parsing fails, a referenced node is missing, or a lookup is ambiguous.
 pub fn canonicalize_content<R: ReadRepository>(
     repository: &R,
     content: &ContentLine,
@@ -487,6 +562,14 @@ pub fn canonicalize_content<R: ReadRepository>(
     })
 }
 
+/// Renders canonical stored content into read-time MemoryRoam text.
+///
+/// Unlabeled links expand to `{{id::>rendered target content}}`.
+///
+/// # Errors
+///
+/// Returns [`KernelError::StorageCorruption`] when stored content contains unresolved tokens or
+/// references missing nodes.
 pub fn render_storage_content<R: ReadRepository>(
     repository: &R,
     content: &ContentLine,

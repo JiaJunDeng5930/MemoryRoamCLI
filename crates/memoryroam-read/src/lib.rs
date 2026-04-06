@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
+#![deny(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::private_intra_doc_links)]
+#![doc = include_str!("../README.md")]
 
 use memoryroam_domain::{
     AliasText, KernelError, KernelResult, NodeId, NodeLine, ReadNodeView, ReadRepository,
     render_storage_content,
 };
 
+/// Builds the rendered read view for one node.
 pub fn read_node<R: ReadRepository>(repository: &R, node_id: NodeId) -> KernelResult<ReadNodeView> {
     let node = repository.get_node(node_id)?.ok_or(KernelError::NotFound {
         entity: "node",
@@ -46,6 +50,7 @@ pub fn read_node<R: ReadRepository>(repository: &R, node_id: NodeId) -> KernelRe
     })
 }
 
+/// Lists rendered top-level nodes in sibling-chain order.
 pub fn list_top_level<R: ReadRepository>(repository: &R) -> KernelResult<Vec<NodeLine>> {
     repository
         .list_children(None)?
@@ -54,6 +59,7 @@ pub fn list_top_level<R: ReadRepository>(repository: &R) -> KernelResult<Vec<Nod
         .collect()
 }
 
+/// Lists rendered direct children for one parent node.
 pub fn list_children<R: ReadRepository>(
     repository: &R,
     parent_id: NodeId,
@@ -65,6 +71,7 @@ pub fn list_children<R: ReadRepository>(
         .collect()
 }
 
+/// Lists aliases for one node after confirming that the node exists.
 pub fn list_aliases<R: ReadRepository>(
     repository: &R,
     node_id: NodeId,
