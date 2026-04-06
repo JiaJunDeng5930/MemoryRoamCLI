@@ -189,14 +189,14 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), KernelError> {
-    let mut store = SqliteStore::open(&cli.db)?;
-
     match cli.command {
         Command::Init => {
+            let mut store = SqliteStore::open_or_create(&cli.db)?;
             init(&mut store)?;
             println!("initialized {}", store.database_path().display());
         }
         Command::Create(command) => {
+            let mut store = SqliteStore::open_existing(&cli.db)?;
             let placement = command
                 .placement
                 .into_placement(Some(Placement::TopLevelLast))?;
@@ -208,15 +208,18 @@ fn run(cli: Cli) -> Result<(), KernelError> {
             }
         }
         Command::Update(command) => {
+            let mut store = SqliteStore::open_existing(&cli.db)?;
             let content = read_content_input(command.content)?;
             update_node(&mut store, parse_node_id(command.id)?, &content)?;
             println!("updated {}", command.id);
         }
         Command::Read(command) => {
+            let store = SqliteStore::open_existing(&cli.db)?;
             let view = read_node(&store, parse_node_id(command.id)?)?;
             print_read_view(&view);
         }
         Command::List(command) => {
+            let store = SqliteStore::open_existing(&cli.db)?;
             if command.top_level == command.children_of.is_some() {
                 return Err(KernelError::Input(String::from(
                     "choose either --top-level or --children-of",
@@ -237,11 +240,13 @@ fn run(cli: Cli) -> Result<(), KernelError> {
             }
         }
         Command::Move(command) => {
+            let mut store = SqliteStore::open_existing(&cli.db)?;
             let placement = command.placement.into_placement(None)?;
             move_node(&mut store, parse_node_id(command.id)?, placement)?;
             println!("moved {}", command.id);
         }
         Command::Delete(command) => {
+            let mut store = SqliteStore::open_existing(&cli.db)?;
             let mode = if command.cascade {
                 DeleteMode::Cascade
             } else {
@@ -252,14 +257,17 @@ fn run(cli: Cli) -> Result<(), KernelError> {
         }
         Command::Alias(alias_command) => match alias_command.command {
             AliasSubcommand::Add { id, text } => {
+                let mut store = SqliteStore::open_existing(&cli.db)?;
                 add_aliases(&mut store, parse_node_id(id)?, &text)?;
                 println!("alias-added {}", id);
             }
             AliasSubcommand::Remove { id, text } => {
+                let mut store = SqliteStore::open_existing(&cli.db)?;
                 remove_alias(&mut store, parse_node_id(id)?, &text)?;
                 println!("alias-removed {}", id);
             }
             AliasSubcommand::List { id } => {
+                let store = SqliteStore::open_existing(&cli.db)?;
                 for alias in list_aliases(&store, parse_node_id(id)?)? {
                     println!("{}", alias.as_str());
                 }

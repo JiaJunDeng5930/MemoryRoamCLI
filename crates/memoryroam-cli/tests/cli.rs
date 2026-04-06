@@ -96,14 +96,17 @@ fn cli_update_accepts_single_line_stdin_with_trailing_newline() {
 }
 
 #[test]
-fn cli_read_requires_initialized_schema() {
+fn cli_read_does_not_create_missing_database_files() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
+    let database_path = temp_dir.path().join("notes.sqlite3");
 
     command(&temp_dir)
         .args(["read", "--id", "1"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported schema version"));
+        .stderr(predicate::str::contains("unable to open database file"));
+
+    assert!(!database_path.exists());
 }
 
 #[test]

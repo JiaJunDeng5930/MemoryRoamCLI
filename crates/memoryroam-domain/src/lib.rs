@@ -297,6 +297,12 @@ pub trait ReadRepository {
 
 pub trait WriteRepository: ReadRepository {
     fn init_schema(&mut self) -> KernelResult<()>;
+    fn create_nodes_from_lines(
+        &mut self,
+        placement: Placement,
+        lines: &[ContentLine],
+        aliases: &[AliasText],
+    ) -> KernelResult<Vec<NodeId>>;
     fn create_nodes(
         &mut self,
         placement: Placement,
