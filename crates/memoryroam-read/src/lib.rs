@@ -147,6 +147,10 @@ mod tests {
                 .collect())
         }
 
+        fn list_outgoing_links(&self, _node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
         fn list_incoming_links(&self, node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
             Ok(self
                 .incoming_links
