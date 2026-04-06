@@ -484,42 +484,27 @@ pub fn render_storage_content<R: ReadRepository>(
     repository: &R,
     content: &ContentLine,
 ) -> KernelResult<String> {
+    let mut active_render_stack = BTreeSet::new();
+    render_storage_content_internal(repository, content, &mut active_render_stack)
+}
+
+fn render_storage_content_internal<R: ReadRepository>(
+    repository: &R,
+    content: &ContentLine,
+    active_render_stack: &mut BTreeSet<NodeId>,
+) -> KernelResult<String> {
     let fragments = parse_content(content)?;
-    let mut target_ids = BTreeSet::new();
-
-    for fragment in &fragments {
-        if let ContentFragment::Link(parsed_link) = fragment {
-            match parsed_link {
-                ParsedLink::ById(node_id)
-                | ParsedLink::ByIdWithLabel(node_id, _)
-                | ParsedLink::ByNumericToken { node_id, .. } => {
-                    target_ids.insert(*node_id);
-                }
-                ParsedLink::ByLookup(lookup) => {
-                    return Err(KernelError::StorageCorruption(format!(
-                        "stored content still contains lookup token `{lookup}`"
-                    )));
-                }
-            }
-        }
-    }
-
-    let contents = repository.fetch_node_contents(&target_ids)?;
     let mut rendered = String::new();
 
     for fragment in fragments {
         match fragment {
             ContentFragment::Text(text) => rendered.push_str(&text),
             ContentFragment::Link(ParsedLink::ById(node_id)) => {
-                let target_content = contents.get(&node_id).ok_or_else(|| {
-                    KernelError::StorageCorruption(format!(
-                        "missing target content for linked node {node_id}"
-                    ))
-                })?;
-                rendered.push_str(&format!("{{{{{node_id}::>{}}}}}", target_content.as_str()));
+                let preview = render_link_preview(repository, node_id, active_render_stack)?;
+                rendered.push_str(&format!("{{{{{node_id}::{preview}}}}}"));
             }
             ContentFragment::Link(ParsedLink::ByIdWithLabel(node_id, label)) => {
-                if !contents.contains_key(&node_id) {
+                if repository.get_node(node_id)?.is_none() {
                     return Err(KernelError::StorageCorruption(format!(
                         "missing target content for linked node {node_id}"
                     )));
@@ -527,20 +512,44 @@ pub fn render_storage_content<R: ReadRepository>(
                 rendered.push_str(&format!("{{{{{node_id}::{}}}}}", label.as_str()));
             }
             ContentFragment::Link(ParsedLink::ByNumericToken { node_id, .. }) => {
-                let target_content = contents.get(&node_id).ok_or_else(|| {
-                    KernelError::StorageCorruption(format!(
-                        "missing target content for linked node {node_id}"
-                    ))
-                })?;
-                rendered.push_str(&format!("{{{{{node_id}::>{}}}}}", target_content.as_str()));
+                let preview = render_link_preview(repository, node_id, active_render_stack)?;
+                rendered.push_str(&format!("{{{{{node_id}::{preview}}}}}"));
             }
             ContentFragment::Link(ParsedLink::ByLookup(_)) => {
-                unreachable!("lookup tokens are rejected above");
+                return Err(KernelError::StorageCorruption(String::from(
+                    "stored content still contains unresolved lookup token",
+                )));
             }
         }
     }
 
     Ok(rendered)
+}
+
+fn render_link_preview<R: ReadRepository>(
+    repository: &R,
+    node_id: NodeId,
+    active_render_stack: &mut BTreeSet<NodeId>,
+) -> KernelResult<String> {
+    let node = repository.get_node(node_id)?.ok_or_else(|| {
+        KernelError::StorageCorruption(format!("missing target content for linked node {node_id}"))
+    })?;
+
+    if !active_render_stack.insert(node_id) {
+        return Err(KernelError::StorageCorruption(format!(
+            "link rendering cycle detected at node {node_id}"
+        )));
+    }
+
+    let rendered_target =
+        render_storage_content_internal(repository, &node.content, active_render_stack)?;
+    active_render_stack.remove(&node_id);
+
+    Ok(format!(">{}", escape_preview_label(&rendered_target)))
+}
+
+fn escape_preview_label(value: &str) -> String {
+    value.replace("{{", r"\{\{").replace("}}", r"\}\}")
 }
 
 fn ensure_node_exists<R: ReadRepository>(repository: &R, node_id: NodeId) -> KernelResult<()> {
@@ -785,6 +794,17 @@ mod tests {
             render_storage_content(&repository, &content).expect("stored content should render");
 
         assert_eq!(rendered, "Read {{12::>Target note}} and {{12::Manual}}");
+    }
+
+    #[test]
+    fn render_storage_content_escapes_nested_links_inside_preview_labels() {
+        let repository = FakeRepository::new(&[(1, "Leaf"), (2, "Parent {{1}}")]);
+        let content = ContentLine::parse("Ref {{2}}").expect("content should parse");
+
+        let rendered =
+            render_storage_content(&repository, &content).expect("stored content should render");
+
+        assert_eq!(rendered, r"Ref {{2::>Parent \{\{1::>Leaf\}\}}}");
     }
 
     #[test]
