@@ -2,6 +2,20 @@
 
 The `.workpad/` directory contains untracked temporary working files used during development, such as overall program design notes, module design notes, and similar draft materials.
 
+## Branch Policy
+
+Do not develop directly on `main`.
+Create a dedicated branch for every change, push that branch, and open a pull request back into `main`.
+
+## Merge Policy
+
+On GitHub, protect `main` and require pull requests for integration.
+Enable `rebase and merge` as the only merge method.
+Disable merge commits and squash merges.
+
+In local Git, keep integration rebase-based as well.
+Set `pull.rebase=true`, `branch.autoSetupRebase=always`, and `merge.ff=only` in the repository-local Git configuration.
+
 ## Maintenance
 
 Update the embedded project index with `cargo xtask agents-md-index update`.
