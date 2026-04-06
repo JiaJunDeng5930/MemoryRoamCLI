@@ -69,5 +69,28 @@ fn cli_delete_blocks_referenced_nodes() {
         .args(["delete", "--id", "1", "--cascade"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("still referenced"));
+        .stderr(predicate::str::contains("still references node 1"));
+}
+
+#[test]
+fn cli_update_accepts_single_line_stdin_with_trailing_newline() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+
+    command(&temp_dir).arg("init").assert().success();
+    command(&temp_dir)
+        .args(["create", "--content", "Topic"])
+        .assert()
+        .success();
+
+    command(&temp_dir)
+        .args(["update", "--id", "1"])
+        .write_stdin("Updated from stdin\n")
+        .assert()
+        .success();
+
+    command(&temp_dir)
+        .args(["read", "--id", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Content: Updated from stdin"));
 }

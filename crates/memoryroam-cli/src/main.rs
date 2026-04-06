@@ -288,6 +288,14 @@ fn read_content_input(explicit_content: Option<String>) -> Result<String, Kernel
             "content must be provided via --content or stdin",
         )));
     }
+
+    if buffer.ends_with('\n') {
+        buffer.pop();
+        if buffer.ends_with('\r') {
+            buffer.pop();
+        }
+    }
+
     Ok(buffer)
 }
 

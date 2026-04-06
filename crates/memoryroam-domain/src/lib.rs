@@ -264,6 +264,7 @@ pub enum ParsedLink {
     ById(NodeId),
     ByLookup(String),
     ByIdWithLabel(NodeId, DisplayLabel),
+    ByNumericToken { node_id: NodeId, raw: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -362,7 +363,11 @@ fn parse_link(token: &str) -> Result<ParsedLink, ParseError> {
     }
 
     if token.chars().all(|character| character.is_ascii_digit()) {
-        return parse_node_id_token(token).map(ParsedLink::ById);
+        let node_id = parse_node_id_token(token)?;
+        return Ok(ParsedLink::ByNumericToken {
+            node_id,
+            raw: token.to_owned(),
+        });
     }
 
     Ok(ParsedLink::ByLookup(token.to_owned()))
@@ -396,6 +401,40 @@ pub fn canonicalize_content<R: ReadRepository>(
                     ensure_node_exists(repository, node_id)?;
                     outgoing_links.push(node_id);
                     stored.push_str(&format!("{{{{{node_id}::{}}}}}", label.as_str()));
+                }
+                ParsedLink::ByNumericToken { node_id, raw } => {
+                    if repository.node_exists(node_id)? {
+                        outgoing_links.push(node_id);
+                        stored.push_str(&format!("{{{{{node_id}}}}}"));
+                    } else {
+                        let lookup_key = LookupKey::new(raw)
+                            .map_err(|error| KernelError::Input(error.to_string()))?;
+                        let mut candidates = repository.lookup_candidates(&lookup_key)?;
+                        if candidates.is_empty() {
+                            return Err(KernelError::NotFound {
+                                entity: "node",
+                                id: node_id,
+                            });
+                        }
+
+                        if candidates.len() > 1 {
+                            candidates.sort_by_key(|candidate| candidate.node_id);
+                            return Err(KernelError::LookupAmbiguous {
+                                lookup: lookup_key.as_str().to_owned(),
+                                candidates,
+                            });
+                        }
+
+                        let candidate = candidates
+                            .pop()
+                            .expect("non-empty candidates should have one element");
+                        outgoing_links.push(candidate.node_id);
+                        stored.push_str(&format!(
+                            "{{{{{}::{}}}}}",
+                            candidate.node_id,
+                            lookup_key.as_str()
+                        ));
+                    }
                 }
                 ParsedLink::ByLookup(raw_lookup) => {
                     let lookup_key = LookupKey::new(raw_lookup)
@@ -451,7 +490,9 @@ pub fn render_storage_content<R: ReadRepository>(
     for fragment in &fragments {
         if let ContentFragment::Link(parsed_link) = fragment {
             match parsed_link {
-                ParsedLink::ById(node_id) | ParsedLink::ByIdWithLabel(node_id, _) => {
+                ParsedLink::ById(node_id)
+                | ParsedLink::ByIdWithLabel(node_id, _)
+                | ParsedLink::ByNumericToken { node_id, .. } => {
                     target_ids.insert(*node_id);
                 }
                 ParsedLink::ByLookup(lookup) => {
@@ -484,6 +525,14 @@ pub fn render_storage_content<R: ReadRepository>(
                     )));
                 }
                 rendered.push_str(&format!("{{{{{node_id}::{}}}}}", label.as_str()));
+            }
+            ContentFragment::Link(ParsedLink::ByNumericToken { node_id, .. }) => {
+                let target_content = contents.get(&node_id).ok_or_else(|| {
+                    KernelError::StorageCorruption(format!(
+                        "missing target content for linked node {node_id}"
+                    ))
+                })?;
+                rendered.push_str(&format!("{{{{{node_id}::>{}}}}}", target_content.as_str()));
             }
             ContentFragment::Link(ParsedLink::ByLookup(_)) => {
                 unreachable!("lookup tokens are rejected above");
@@ -663,7 +712,10 @@ mod tests {
             fragments,
             vec![
                 ContentFragment::Text("A ".to_owned()),
-                ContentFragment::Link(ParsedLink::ById(NodeId::new(42).expect("valid test id"))),
+                ContentFragment::Link(ParsedLink::ByNumericToken {
+                    node_id: NodeId::new(42).expect("valid test id"),
+                    raw: String::from("42"),
+                }),
                 ContentFragment::Text(" B ".to_owned()),
                 ContentFragment::Link(ParsedLink::ByLookup("topic".to_owned())),
                 ContentFragment::Text(" C ".to_owned()),
@@ -706,6 +758,21 @@ mod tests {
             }
             other => panic!("expected lookup ambiguity, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn canonicalize_content_falls_back_to_numeric_lookup_when_id_is_missing() {
+        let repository = FakeRepository::new(&[(1, "Anchor")]).with_aliases(&[("123", &[1])]);
+        let content = ContentLine::parse("See {{123}}").expect("content should parse");
+
+        let canonical = canonicalize_content(&repository, &content)
+            .expect("numeric lookup should resolve when matching id is absent");
+
+        assert_eq!(canonical.content.as_str(), "See {{1::123}}");
+        assert_eq!(
+            canonical.outgoing_links,
+            vec![NodeId::new(1).expect("valid test id")]
+        );
     }
 
     #[test]
