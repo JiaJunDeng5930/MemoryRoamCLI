@@ -515,11 +515,13 @@ impl WriteRepository for SqliteStore {
         let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
         ensure_schema_initialized(&transaction)?;
         ensure_node_exists_in_db(&transaction, node_id)?;
+        let alias_key =
+            LookupKey::from_alias(alias).map_err(|error| KernelError::Input(error.to_string()))?;
         let changed = transaction
             .execute(
                 "DELETE FROM node_aliases
-                 WHERE node_id = ?1 AND alias_text = ?2",
-                params![node_id.value(), alias.as_str()],
+                 WHERE node_id = ?1 AND alias_key = ?2",
+                params![node_id.value(), alias_key.as_str()],
             )
             .map_err(map_sqlite_error)?;
         if changed == 0 {
@@ -1469,6 +1471,30 @@ mod tests {
         assert_eq!(
             incoming[0].source_node_id,
             NodeId::new(2).expect("valid id")
+        );
+    }
+
+    #[test]
+    fn alias_remove_uses_trimmed_lookup_key() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        create_nodes(&mut store, "Topic", &[], Placement::TopLevelLast)
+            .expect("create should succeed");
+        add_aliases(
+            &mut store,
+            NodeId::new(1).expect("valid id"),
+            &[String::from(" topic ")],
+        )
+        .expect("alias add should succeed");
+
+        memoryroam_write::remove_alias(&mut store, NodeId::new(1).expect("valid id"), "topic")
+            .expect("trimmed alias removal should succeed");
+
+        assert!(
+            store
+                .list_aliases(NodeId::new(1).expect("valid id"))
+                .expect("aliases should load")
+                .is_empty()
         );
     }
 }

@@ -42,7 +42,13 @@ pub fn create_nodes<R: WriteRepository>(
     let mut next_placement = placement;
 
     for (index, content) in lines.into_iter().enumerate() {
-        let canonical = canonicalize_content(repository, &content)?;
+        let canonical = match canonicalize_content(repository, &content) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                rollback_created_nodes(repository, &created_ids)?;
+                return Err(error);
+            }
+        };
         let new_node = NewNodeRecord {
             content: canonical.content,
             lookup_key: canonical.lookup_key,
@@ -54,18 +60,35 @@ pub fn create_nodes<R: WriteRepository>(
             },
         };
 
-        let node_id = repository
-            .create_nodes(next_placement, &[new_node])?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
+        let node_id = match repository.create_nodes(next_placement, &[new_node]) {
+            Ok(node_ids) => node_ids.into_iter().next().ok_or_else(|| {
                 KernelError::Storage(String::from("repository did not return a node id"))
-            })?;
+            }),
+            Err(error) => {
+                rollback_created_nodes(repository, &created_ids)?;
+                return Err(error);
+            }
+        }?;
         created_ids.push(node_id);
         next_placement = Placement::After(node_id);
     }
 
     Ok(created_ids)
+}
+
+fn rollback_created_nodes<R: WriteRepository>(
+    repository: &mut R,
+    created_ids: &[NodeId],
+) -> KernelResult<()> {
+    for node_id in created_ids.iter().rev().copied() {
+        if let Err(rollback_error) = repository.delete_node(node_id, DeleteMode::Cascade) {
+            return Err(KernelError::Storage(format!(
+                "create rollback failed for node {node_id}: {rollback_error}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 pub fn update_node<R: WriteRepository>(
@@ -269,7 +292,8 @@ mod tests {
             Ok(())
         }
 
-        fn delete_node(&mut self, _node_id: NodeId, _mode: DeleteMode) -> KernelResult<()> {
+        fn delete_node(&mut self, node_id: NodeId, _mode: DeleteMode) -> KernelResult<()> {
+            self.existing.remove(&node_id);
             Ok(())
         }
 
