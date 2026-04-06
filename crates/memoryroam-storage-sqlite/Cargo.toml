@@ -4,5 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-memoryroam-application = { path = "../memoryroam-application" }
 memoryroam-domain = { path = "../memoryroam-domain" }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+
+[dev-dependencies]
+memoryroam-read = { path = "../memoryroam-read" }
+memoryroam-write = { path = "../memoryroam-write" }
+tempfile = "3.23.0"

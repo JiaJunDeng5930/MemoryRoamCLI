@@ -1,9 +1,10 @@
 [workspace]
 members = [
-    "crates/memoryroam-application",
     "crates/memoryroam-cli",
     "crates/memoryroam-domain",
+    "crates/memoryroam-read",
     "crates/memoryroam-storage-sqlite",
+    "crates/memoryroam-write",
     "xtask",
 ]
 resolver = "3"
