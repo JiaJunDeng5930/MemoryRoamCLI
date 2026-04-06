@@ -277,6 +277,39 @@ mod tests {
             Ok(())
         }
 
+        fn create_nodes_from_lines(
+            &mut self,
+            placement: Placement,
+            lines: &[ContentLine],
+            aliases: &[AliasText],
+        ) -> KernelResult<Vec<NodeId>> {
+            let mut created_ids = Vec::with_capacity(lines.len());
+            let mut next_placement = placement;
+
+            for (index, line) in lines.iter().enumerate() {
+                let canonical = canonicalize_content(self, line)?;
+                let node = NewNodeRecord {
+                    content: canonical.content,
+                    lookup_key: canonical.lookup_key,
+                    outgoing_links: canonical.outgoing_links,
+                    aliases: if index == 0 {
+                        aliases.to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                };
+                let node_id = self
+                    .create_nodes(next_placement, &[node])?
+                    .into_iter()
+                    .next()
+                    .expect("fake repository should create one node");
+                created_ids.push(node_id);
+                next_placement = Placement::After(node_id);
+            }
+
+            Ok(created_ids)
+        }
+
         fn create_nodes(
             &mut self,
             _placement: Placement,

@@ -1,16 +1,18 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use memoryroam_domain::{
     AliasText, ContentLine, DeleteMode, IncomingLinkRecord, KernelError, KernelResult,
     LookupCandidate, LookupKey, NewNodeRecord, NodeId, Placement, ReadRepository, StoredNode,
-    WriteRepository,
+    WriteRepository, canonicalize_content,
 };
 use rusqlite::types::Type;
-use rusqlite::{Connection, ErrorCode, OptionalExtension, Params, Row, Transaction, params};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Params, Row, Transaction, params,
+};
 
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -155,9 +157,24 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    pub fn open(database_path: impl AsRef<Path>) -> KernelResult<Self> {
+    pub fn open_or_create(database_path: impl AsRef<Path>) -> KernelResult<Self> {
         let database_path = database_path.as_ref().to_path_buf();
         let connection = Connection::open(&database_path).map_err(map_sqlite_error)?;
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .map_err(map_sqlite_error)?;
+
+        Ok(Self {
+            database_path,
+            connection,
+        })
+    }
+
+    pub fn open_existing(database_path: impl AsRef<Path>) -> KernelResult<Self> {
+        let database_path = database_path.as_ref().to_path_buf();
+        let connection =
+            Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .map_err(map_sqlite_error)?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(map_sqlite_error)?;
@@ -196,6 +213,11 @@ impl ReadRepository for SqliteStore {
         follow_chain(&self.connection, start)
     }
 
+    fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+        ensure_schema_initialized(&self.connection)?;
+        list_outgoing_links_from_handle(&self.connection, node_id)
+    }
+
     fn list_incoming_links(&self, node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
         ensure_schema_initialized(&self.connection)?;
         let mut statement = self
@@ -230,28 +252,6 @@ impl ReadRepository for SqliteStore {
         }
 
         Ok(incoming)
-    }
-
-    fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
-        ensure_schema_initialized(&self.connection)?;
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT target_node_id
-                 FROM node_links
-                 WHERE source_node_id = ?1
-                 ORDER BY ordinal",
-            )
-            .map_err(map_sqlite_error)?;
-        let rows = statement
-            .query_map(params![node_id.value()], |row| node_id_from_row(row, 0))
-            .map_err(map_sqlite_error)?;
-
-        let mut targets = Vec::new();
-        for row in rows {
-            targets.push(row.map_err(map_sqlite_error)?);
-        }
-        Ok(targets)
     }
 
     fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>> {
@@ -358,6 +358,50 @@ impl WriteRepository for SqliteStore {
             .map_err(map_sqlite_error)
     }
 
+    fn create_nodes_from_lines(
+        &mut self,
+        placement: Placement,
+        lines: &[ContentLine],
+        aliases: &[AliasText],
+    ) -> KernelResult<Vec<NodeId>> {
+        if lines.is_empty() {
+            return Err(KernelError::Input(String::from(
+                "create_nodes_from_lines requires at least one line",
+            )));
+        }
+
+        let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
+        ensure_schema_initialized(&transaction)?;
+        validate_placement_target(&transaction, placement, None)?;
+
+        let mut created_ids = Vec::with_capacity(lines.len());
+        let mut next_placement = placement;
+
+        for (index, line) in lines.iter().enumerate() {
+            let repository = TransactionRepository {
+                transaction: &transaction,
+            };
+            let canonical = canonicalize_content(&repository, line)?;
+            let node = NewNodeRecord {
+                content: canonical.content,
+                lookup_key: canonical.lookup_key,
+                outgoing_links: canonical.outgoing_links,
+                aliases: if index == 0 {
+                    aliases.to_vec()
+                } else {
+                    Vec::new()
+                },
+            };
+            let node_id = insert_single_node(&transaction, next_placement, &node)?;
+            ensure_no_link_cycle(&repository, node_id)?;
+            created_ids.push(node_id);
+            next_placement = Placement::After(node_id);
+        }
+
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(created_ids)
+    }
+
     fn create_nodes(
         &mut self,
         placement: Placement,
@@ -400,6 +444,10 @@ impl WriteRepository for SqliteStore {
             let node_id = inserted_ids[index];
             insert_aliases(&transaction, node_id, &node.aliases)?;
             refresh_outgoing_links(&transaction, node_id, &node.outgoing_links)?;
+            let repository = TransactionRepository {
+                transaction: &transaction,
+            };
+            ensure_no_link_cycle(&repository, node_id)?;
         }
 
         attach_chain(
@@ -433,6 +481,10 @@ impl WriteRepository for SqliteStore {
             )
             .map_err(map_sqlite_error)?;
         refresh_outgoing_links(&transaction, node_id, outgoing_links)?;
+        let repository = TransactionRepository {
+            transaction: &transaction,
+        };
+        ensure_no_link_cycle(&repository, node_id)?;
 
         transaction.commit().map_err(map_sqlite_error)
     }
@@ -561,6 +613,7 @@ impl WriteRepository for SqliteStore {
 }
 
 trait SqlHandle {
+    fn prepare<'a>(&'a self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'a>>;
     fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
     fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
     where
@@ -569,7 +622,167 @@ trait SqlHandle {
     fn last_insert_rowid(&self) -> i64;
 }
 
+struct TransactionRepository<'transaction> {
+    transaction: &'transaction Transaction<'transaction>,
+}
+
+impl ReadRepository for TransactionRepository<'_> {
+    fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+        fetch_node(self.transaction, node_id)
+    }
+
+    fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+        let start = match parent_id {
+            Some(parent_id) => {
+                let parent =
+                    fetch_node(self.transaction, parent_id)?.ok_or(KernelError::NotFound {
+                        entity: "node",
+                        id: parent_id,
+                    })?;
+                parent.first_child_id
+            }
+            None => fetch_root(self.transaction)?.first_child_id,
+        };
+
+        follow_chain(self.transaction, start)
+    }
+
+    fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+        list_outgoing_links_from_handle(self.transaction, node_id)
+    }
+
+    fn list_incoming_links(&self, node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+        let mut statement = self
+            .transaction
+            .prepare(
+                "SELECT source_node_id, source_content, ordinal
+                 FROM v_incoming_links
+                 WHERE target_node_id = ?1
+                 ORDER BY source_node_id, ordinal",
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map(params![node_id.value()], |row| {
+                Ok((
+                    node_id_from_row(row, 0)?,
+                    content_line_from_row(row, 1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(map_sqlite_error)?;
+
+        let mut incoming = Vec::new();
+        for row in rows {
+            let (source_node_id, source_content, ordinal) = row.map_err(map_sqlite_error)?;
+            incoming.push(IncomingLinkRecord {
+                source_node_id,
+                source_content,
+                ordinal,
+                path: self.node_path(source_node_id)?,
+            });
+        }
+
+        Ok(incoming)
+    }
+
+    fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+        let mut statement = self
+            .transaction
+            .prepare(
+                "SELECT alias_text
+                 FROM node_aliases
+                 WHERE node_id = ?1
+                 ORDER BY alias_text",
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map(params![node_id.value()], |row| {
+                row.get::<_, String>(0).and_then(|value| {
+                    AliasText::new(value).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                    })
+                })
+            })
+            .map_err(map_sqlite_error)?;
+
+        let mut aliases = Vec::new();
+        for row in rows {
+            aliases.push(row.map_err(map_sqlite_error)?);
+        }
+        Ok(aliases)
+    }
+
+    fn fetch_node_contents(
+        &self,
+        node_ids: &BTreeSet<NodeId>,
+    ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+        let mut contents = BTreeMap::new();
+        for node_id in node_ids {
+            if let Some(node) = self.get_node(*node_id)? {
+                contents.insert(*node_id, node.content);
+            }
+        }
+        Ok(contents)
+    }
+
+    fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+        let mut statement = self
+            .transaction
+            .prepare(
+                "SELECT DISTINCT n.id, n.content
+                 FROM v_lookup_candidates AS c
+                 JOIN nodes AS n
+                   ON n.id = c.node_id
+                 WHERE c.lookup_key = ?1
+                 ORDER BY n.id",
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map(params![key.as_str()], |row| {
+                Ok((node_id_from_row(row, 0)?, content_line_from_row(row, 1)?))
+            })
+            .map_err(map_sqlite_error)?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (node_id, content) = row.map_err(map_sqlite_error)?;
+            candidates.push(LookupCandidate {
+                node_id,
+                content,
+                path: self.node_path(node_id)?,
+            });
+        }
+
+        Ok(candidates)
+    }
+
+    fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+        let mut segments = Vec::new();
+        let mut current = Some(node_id);
+
+        while let Some(current_id) = current {
+            let node = self
+                .get_node(current_id)?
+                .ok_or(KernelError::StorageCorruption(format!(
+                    "missing node {current_id} while computing path"
+                )))?;
+            segments.push(memoryroam_domain::render_storage_content(
+                self,
+                &node.content,
+            )?);
+            current = node.parent_id;
+        }
+
+        segments.reverse();
+        Ok(segments.join(" > "))
+    }
+}
+
 impl SqlHandle for Connection {
+    fn prepare<'a>(&'a self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'a>> {
+        Connection::prepare(self, sql)
+    }
+
     fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         Connection::execute(self, sql, params)
     }
@@ -588,6 +801,10 @@ impl SqlHandle for Connection {
 }
 
 impl SqlHandle for Transaction<'_> {
+    fn prepare<'a>(&'a self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'a>> {
+        self.deref().prepare(sql)
+    }
+
     fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.deref().execute(sql, params)
     }
@@ -707,6 +924,85 @@ fn fetch_root(handle: &impl SqlHandle) -> KernelResult<RootRecord> {
             },
         )
         .map_err(map_sqlite_error)
+}
+
+fn list_outgoing_links_from_handle(
+    handle: &impl SqlHandle,
+    node_id: NodeId,
+) -> KernelResult<Vec<NodeId>> {
+    let mut statement = handle
+        .prepare(
+            "SELECT target_node_id
+             FROM node_links
+             WHERE source_node_id = ?1
+             ORDER BY ordinal",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map(params![node_id.value()], |row| node_id_from_row(row, 0))
+        .map_err(map_sqlite_error)?;
+
+    let mut targets = Vec::new();
+    for row in rows {
+        targets.push(row.map_err(map_sqlite_error)?);
+    }
+    Ok(targets)
+}
+
+fn insert_single_node(
+    transaction: &Transaction<'_>,
+    placement: Placement,
+    node: &NewNodeRecord,
+) -> KernelResult<NodeId> {
+    transaction
+        .execute(
+            "INSERT INTO nodes (
+                content,
+                content_lookup_key,
+                parent_id,
+                first_child_id,
+                last_child_id,
+                prev_sibling_id,
+                next_sibling_id
+             ) VALUES (?1, ?2, NULL, NULL, NULL, NULL, NULL)",
+            params![node.content.as_str(), node.lookup_key.as_str()],
+        )
+        .map_err(map_sqlite_error)?;
+    let node_id = NodeId::try_from(transaction.last_insert_rowid())
+        .map_err(|error| KernelError::Storage(error.to_string()))?;
+    insert_aliases(transaction, node_id, &node.aliases)?;
+    refresh_outgoing_links(transaction, node_id, &node.outgoing_links)?;
+    attach_chain(transaction, node_id, node_id, placement)?;
+    Ok(node_id)
+}
+
+fn ensure_no_link_cycle(
+    repository: &impl ReadRepository,
+    start_node_id: NodeId,
+) -> KernelResult<()> {
+    let mut queue = repository
+        .list_outgoing_links(start_node_id)?
+        .into_iter()
+        .collect::<VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+
+    while let Some(current_id) = queue.pop_front() {
+        if !visited.insert(current_id) {
+            continue;
+        }
+
+        if current_id == start_node_id {
+            return Err(KernelError::Constraint(format!(
+                "node {start_node_id} cannot participate in a link cycle"
+            )));
+        }
+
+        for next_id in repository.list_outgoing_links(current_id)? {
+            queue.push_back(next_id);
+        }
+    }
+
+    Ok(())
 }
 
 fn follow_chain(
@@ -1366,7 +1662,7 @@ mod tests {
             .into_temp_path()
             .keep()
             .expect("temp path should be kept");
-        SqliteStore::open(path).expect("store should open")
+        SqliteStore::open_or_create(path).expect("store should open")
     }
 
     #[test]
