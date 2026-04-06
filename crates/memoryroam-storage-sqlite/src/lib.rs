@@ -317,7 +317,10 @@ impl ReadRepository for SqliteStore {
                 .ok_or(KernelError::StorageCorruption(format!(
                     "missing node {current_id} while computing path"
                 )))?;
-            segments.push(node.content.as_str().to_owned());
+            segments.push(memoryroam_domain::render_storage_content(
+                self,
+                &node.content,
+            )?);
             current = node.parent_id;
         }
 
@@ -1495,6 +1498,23 @@ mod tests {
                 .list_aliases(NodeId::new(1).expect("valid id"))
                 .expect("aliases should load")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn node_path_uses_rendered_content() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        create_nodes(&mut store, "Leaf", &[], Placement::TopLevelLast)
+            .expect("first create should succeed");
+        create_nodes(&mut store, "Parent {{1}}", &[], Placement::TopLevelLast)
+            .expect("second create should succeed");
+
+        assert_eq!(
+            store
+                .node_path(NodeId::new(2).expect("valid id"))
+                .expect("path should load"),
+            "Parent {{1::>Leaf}}"
         );
     }
 }
