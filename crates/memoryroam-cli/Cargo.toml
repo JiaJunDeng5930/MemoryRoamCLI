@@ -1,0 +1,8 @@
+[package]
+name = "memoryroam-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memoryroam-application = { path = "../memoryroam-application" }
+memoryroam-storage-sqlite = { path = "../memoryroam-storage-sqlite" }
