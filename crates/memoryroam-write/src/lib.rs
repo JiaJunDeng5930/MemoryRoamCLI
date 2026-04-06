@@ -38,26 +38,34 @@ pub fn create_nodes<R: WriteRepository>(
         .map(|value| AliasText::new(value.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| KernelError::Input(error.to_string()))?;
+    let mut created_ids = Vec::with_capacity(lines.len());
+    let mut next_placement = placement;
 
-    let new_nodes = lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, content)| {
-            let canonical = canonicalize_content(repository, &content)?;
-            Ok(NewNodeRecord {
-                content: canonical.content,
-                lookup_key: canonical.lookup_key,
-                outgoing_links: canonical.outgoing_links,
-                aliases: if index == 0 {
-                    aliases.clone()
-                } else {
-                    Vec::new()
-                },
-            })
-        })
-        .collect::<KernelResult<Vec<_>>>()?;
+    for (index, content) in lines.into_iter().enumerate() {
+        let canonical = canonicalize_content(repository, &content)?;
+        let new_node = NewNodeRecord {
+            content: canonical.content,
+            lookup_key: canonical.lookup_key,
+            outgoing_links: canonical.outgoing_links,
+            aliases: if index == 0 {
+                aliases.clone()
+            } else {
+                Vec::new()
+            },
+        };
 
-    repository.create_nodes(placement, &new_nodes)
+        let node_id = repository
+            .create_nodes(next_placement, &[new_node])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                KernelError::Storage(String::from("repository did not return a node id"))
+            })?;
+        created_ids.push(node_id);
+        next_placement = Placement::After(node_id);
+    }
+
+    Ok(created_ids)
 }
 
 pub fn update_node<R: WriteRepository>(
@@ -141,6 +149,7 @@ mod tests {
         aliases: BTreeMap<String, Vec<NodeId>>,
         created: Vec<NewNodeRecord>,
         updated: Vec<(NodeId, ContentLine, LookupKey, Vec<NodeId>)>,
+        next_created_id: i64,
     }
 
     impl ReadRepository for FakeRepository {
@@ -207,7 +216,37 @@ mod tests {
             nodes: &[NewNodeRecord],
         ) -> KernelResult<Vec<NodeId>> {
             self.created.extend_from_slice(nodes);
-            Ok(vec![NodeId::new(1).expect("valid test id")])
+            let mut created_ids = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                self.next_created_id += 1;
+                let node_id = NodeId::new(self.next_created_id).expect("valid test id");
+                self.existing.insert(
+                    node_id,
+                    StoredNode {
+                        id: node_id,
+                        content: node.content.clone(),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: None,
+                        next_sibling_id: None,
+                    },
+                );
+                self.aliases
+                    .entry(node.lookup_key.as_str().to_owned())
+                    .or_default()
+                    .push(node_id);
+                for alias in &node.aliases {
+                    let lookup_key = LookupKey::from_alias(alias)
+                        .map_err(|error| KernelError::Input(error.to_string()))?;
+                    self.aliases
+                        .entry(lookup_key.as_str().to_owned())
+                        .or_default()
+                        .push(node_id);
+                }
+                created_ids.push(node_id);
+            }
+            Ok(created_ids)
         }
 
         fn update_node_content(
@@ -289,5 +328,22 @@ mod tests {
 
         assert_eq!(repository.updated.len(), 1);
         assert_eq!(repository.updated[0].1.as_str(), "See {{7::Topic}}");
+    }
+
+    #[test]
+    fn create_nodes_allows_later_lines_to_reference_earlier_lines() {
+        let mut repository = FakeRepository::default();
+
+        let created_ids = create_nodes(
+            &mut repository,
+            "Topic\nSee {{Topic}}",
+            &[],
+            Placement::TopLevelLast,
+        )
+        .expect("multiline create should allow later lines to reference earlier ones");
+
+        assert_eq!(created_ids.len(), 2);
+        assert_eq!(repository.created.len(), 2);
+        assert_eq!(repository.created[1].content.as_str(), "See {{1::Topic}}");
     }
 }
