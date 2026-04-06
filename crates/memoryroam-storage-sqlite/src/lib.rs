@@ -429,13 +429,6 @@ impl WriteRepository for SqliteStore {
             id: node_id,
         })?;
 
-        if let Some(incoming) = find_incoming_link(&transaction, node_id)? {
-            return Err(KernelError::Constraint(format!(
-                "node {node_id} is still referenced by node {}",
-                incoming.source_node_id
-            )));
-        }
-
         match mode {
             DeleteMode::Cascade => {
                 if let Some((target_node_id, source_node_id)) =
@@ -463,6 +456,13 @@ impl WriteRepository for SqliteStore {
                     .map_err(map_sqlite_error)?;
             }
             DeleteMode::Reparent(placement) => {
+                if let Some(incoming) = find_incoming_link(&transaction, node_id)? {
+                    return Err(KernelError::Constraint(format!(
+                        "node {node_id} is still referenced by node {}",
+                        incoming.source_node_id
+                    )));
+                }
+
                 validate_placement_target(&transaction, placement, Some(node_id))?;
                 if let Some(target_id) = placement.target_id()
                     && is_in_subtree(&transaction, node_id, target_id)?
@@ -1411,6 +1411,34 @@ mod tests {
         .expect_err("delete should fail when incoming links exist");
 
         assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn cascade_delete_allows_internal_subtree_references() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        create_nodes(&mut store, "Root", &[], Placement::TopLevelLast)
+            .expect("root create should succeed");
+        create_nodes(
+            &mut store,
+            "Child {{1}}",
+            &[],
+            Placement::LastChildOf(NodeId::new(1).expect("valid id")),
+        )
+        .expect("child create should succeed");
+
+        delete_node(
+            &mut store,
+            NodeId::new(1).expect("valid id"),
+            DeleteMode::Cascade,
+        )
+        .expect("cascade delete should ignore internal subtree references");
+
+        assert!(
+            list_top_level(&store)
+                .expect("list should succeed")
+                .is_empty()
+        );
     }
 
     #[test]
