@@ -105,3 +105,24 @@ fn cli_read_requires_initialized_schema() {
         .failure()
         .stderr(predicate::str::contains("unsupported schema version"));
 }
+
+#[test]
+fn cli_multiline_create_rolls_back_on_later_failure() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+
+    command(&temp_dir).arg("init").assert().success();
+
+    command(&temp_dir)
+        .args(["create", "--content", "First\nRef {{Missing}}"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "lookup `Missing` did not match any node",
+        ));
+
+    command(&temp_dir)
+        .args(["list", "--top-level"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
