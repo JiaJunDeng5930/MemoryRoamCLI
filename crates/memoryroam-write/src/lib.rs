@@ -104,6 +104,12 @@ pub fn update_node<R: WriteRepository>(
         outgoing_links,
     } = canonicalize_content(repository, &content)?;
 
+    if outgoing_links.contains(&node_id) {
+        return Err(KernelError::Constraint(format!(
+            "node {node_id} cannot link to itself"
+        )));
+    }
+
     repository.update_node_content(node_id, &content, &lookup_key, &outgoing_links)
 }
 
@@ -369,5 +375,31 @@ mod tests {
         assert_eq!(created_ids.len(), 2);
         assert_eq!(repository.created.len(), 2);
         assert_eq!(repository.created[1].content.as_str(), "See {{1::Topic}}");
+    }
+
+    #[test]
+    fn update_node_rejects_self_referential_links() {
+        let mut repository = FakeRepository::default();
+        let node_id = NodeId::new(1).expect("valid test id");
+        repository.existing.insert(
+            node_id,
+            StoredNode {
+                id: node_id,
+                content: ContentLine::parse("Topic").expect("valid content"),
+                parent_id: None,
+                first_child_id: None,
+                last_child_id: None,
+                prev_sibling_id: None,
+                next_sibling_id: None,
+            },
+        );
+        repository
+            .aliases
+            .insert(String::from("Topic"), vec![node_id]);
+
+        let error = update_node(&mut repository, node_id, "See {{Topic}}")
+            .expect_err("self-referential updates should fail");
+
+        assert!(matches!(error, KernelError::Constraint(_)));
     }
 }
