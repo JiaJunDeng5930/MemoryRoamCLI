@@ -47,6 +47,10 @@ impl NodeId {
     ///
     /// Returns [`NodeIdError::NotPositive`] when `value <= 0`.
     pub fn new(value: i64) -> Result<Self, NodeIdError> {
+        if value <= 0 {
+            return Err(NodeIdError::NotPositive);
+        }
+
         NonZeroI64::new(value)
             .map(Self)
             .ok_or(NodeIdError::NotPositive)
@@ -790,6 +794,13 @@ mod tests {
             ContentLine::parse("Single line note").expect("single line content should parse");
 
         assert_eq!(content.as_str(), "Single line note");
+    }
+
+    #[test]
+    fn node_id_rejects_negative_values() {
+        let error = NodeId::new(-1).expect_err("negative node ids should fail");
+
+        assert_eq!(error, NodeIdError::NotPositive);
     }
 
     #[test]
