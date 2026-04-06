@@ -123,7 +123,7 @@ cargo run --bin memoryroam -- --db notes.sqlite3 alias remove --id 1 --text "top
 - Node content is always a single line.
 - Multi-line `create` input means multiple sibling nodes.
 - Links are stored in canonical form, using stable node IDs internally.
-- Lookup normalization only trims surrounding whitespace.
+- Lookup normalization trims surrounding whitespace and rejects purely numeric or reserved-syntax keys.
 - `read` renders unlabeled links as `{{id::>current target content}}`.
 - Create and update reject link cycles before they are persisted.
 - Multi-line `create` is atomic: later failures do not leave earlier lines behind.
