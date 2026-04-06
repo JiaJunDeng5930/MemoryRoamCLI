@@ -383,10 +383,12 @@ impl WriteRepository for SqliteStore {
 
         let mut created_ids = Vec::with_capacity(lines.len());
         let mut next_placement = placement;
+        let mut preferred_candidates = BTreeMap::<LookupKey, Vec<NodeId>>::new();
 
         for (index, line) in lines.iter().enumerate() {
-            let repository = TransactionRepository {
+            let repository = BatchCreateRepository {
                 transaction: &transaction,
+                preferred_candidates: preferred_candidates.clone(),
             };
             let canonical = canonicalize_content(&repository, line)?;
             let node = NewNodeRecord {
@@ -403,6 +405,22 @@ impl WriteRepository for SqliteStore {
             ensure_no_link_cycle(&repository, node_id)?;
             created_ids.push(node_id);
             next_placement = Placement::After(node_id);
+
+            if let Ok(content_key) = LookupKey::from_content(&node.content) {
+                preferred_candidates
+                    .entry(content_key)
+                    .or_default()
+                    .push(node_id);
+            }
+
+            for alias in &node.aliases {
+                let alias_key = LookupKey::from_alias(alias)
+                    .map_err(|error| KernelError::Input(error.to_string()))?;
+                preferred_candidates
+                    .entry(alias_key)
+                    .or_default()
+                    .push(node_id);
+            }
         }
 
         transaction.commit().map_err(map_sqlite_error)?;
@@ -633,6 +651,11 @@ struct TransactionRepository<'transaction> {
     transaction: &'transaction Transaction<'transaction>,
 }
 
+struct BatchCreateRepository<'transaction> {
+    transaction: &'transaction Transaction<'transaction>,
+    preferred_candidates: BTreeMap<LookupKey, Vec<NodeId>>,
+}
+
 impl ReadRepository for TransactionRepository<'_> {
     fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
         fetch_node(self.transaction, node_id)
@@ -782,6 +805,85 @@ impl ReadRepository for TransactionRepository<'_> {
 
         segments.reverse();
         Ok(segments.join(" > "))
+    }
+}
+
+impl ReadRepository for BatchCreateRepository<'_> {
+    fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+        fetch_node(self.transaction, node_id)
+    }
+
+    fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+        let start = match parent_id {
+            Some(parent_id) => {
+                let parent =
+                    fetch_node(self.transaction, parent_id)?.ok_or(KernelError::NotFound {
+                        entity: "node",
+                        id: parent_id,
+                    })?;
+                parent.first_child_id
+            }
+            None => fetch_root(self.transaction)?.first_child_id,
+        };
+
+        follow_chain(self.transaction, start)
+    }
+
+    fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+        list_outgoing_links_from_handle(self.transaction, node_id)
+    }
+
+    fn list_incoming_links(&self, node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .list_incoming_links(node_id)
+    }
+
+    fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .list_aliases(node_id)
+    }
+
+    fn fetch_node_contents(
+        &self,
+        node_ids: &BTreeSet<NodeId>,
+    ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .fetch_node_contents(node_ids)
+    }
+
+    fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+        if let Some(node_ids) = self.preferred_candidates.get(key) {
+            let mut candidates = Vec::with_capacity(node_ids.len());
+            for node_id in node_ids {
+                let node = fetch_node(self.transaction, *node_id)?.ok_or(
+                    KernelError::StorageCorruption(format!("missing batch-created node {node_id}")),
+                )?;
+                candidates.push(LookupCandidate {
+                    node_id: *node_id,
+                    content: node.content,
+                    path: self.node_path(*node_id)?,
+                });
+            }
+            return Ok(candidates);
+        }
+
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .lookup_candidates(key)
+    }
+
+    fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .node_path(node_id)
     }
 }
 
@@ -1705,6 +1807,27 @@ mod tests {
         let incoming =
             read_node(&store, NodeId::new(1).expect("valid id")).expect("read should succeed");
         assert_eq!(incoming.incoming_links.len(), 1);
+    }
+
+    #[test]
+    fn batch_create_prefers_earlier_lines_over_existing_duplicates() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        create_nodes(&mut store, "Topic", &[], Placement::TopLevelLast)
+            .expect("existing topic should be created");
+
+        create_nodes(
+            &mut store,
+            "Topic\nSee {{Topic}}",
+            &[],
+            Placement::TopLevelLast,
+        )
+        .expect("batch create should prefer the earlier line in the same batch");
+
+        let view =
+            read_node(&store, NodeId::new(3).expect("valid id")).expect("read should succeed");
+
+        assert_eq!(view.node.rendered_content, "See {{2::Topic}}");
     }
 
     #[test]
