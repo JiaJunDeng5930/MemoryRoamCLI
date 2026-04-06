@@ -232,6 +232,28 @@ impl ReadRepository for SqliteStore {
         Ok(incoming)
     }
 
+    fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+        ensure_schema_initialized(&self.connection)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT target_node_id
+                 FROM node_links
+                 WHERE source_node_id = ?1
+                 ORDER BY ordinal",
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map(params![node_id.value()], |row| node_id_from_row(row, 0))
+            .map_err(map_sqlite_error)?;
+
+        let mut targets = Vec::new();
+        for row in rows {
+            targets.push(row.map_err(map_sqlite_error)?);
+        }
+        Ok(targets)
+    }
+
     fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>> {
         ensure_schema_initialized(&self.connection)?;
         let mut statement = self

@@ -280,6 +280,7 @@ pub enum ParseError {
 pub trait ReadRepository {
     fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>>;
     fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>>;
+    fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>>;
     fn list_incoming_links(&self, node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>>;
     fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>>;
     fn fetch_node_contents(
@@ -618,6 +619,19 @@ mod tests {
 
         fn list_children(&self, _parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
             Ok(Vec::new())
+        }
+
+        fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            let content = self
+                .nodes
+                .get(&node_id)
+                .ok_or(KernelError::NotFound {
+                    entity: "node",
+                    id: node_id,
+                })?
+                .clone();
+            let canonical = canonicalize_content(self, &content)?;
+            Ok(canonical.outgoing_links)
         }
 
         fn list_incoming_links(&self, _node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {

@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::collections::{BTreeSet, VecDeque};
+
 use memoryroam_domain::{
     AliasText, CanonicalizedContent, ContentLine, DeleteMode, KernelError, KernelResult, LookupKey,
     NewNodeRecord, NodeId, Placement, WriteRepository, canonicalize_content,
@@ -110,7 +112,36 @@ pub fn update_node<R: WriteRepository>(
         )));
     }
 
+    ensure_no_link_cycle(repository, node_id, &outgoing_links)?;
+
     repository.update_node_content(node_id, &content, &lookup_key, &outgoing_links)
+}
+
+fn ensure_no_link_cycle<R: WriteRepository>(
+    repository: &R,
+    node_id: NodeId,
+    outgoing_links: &[NodeId],
+) -> KernelResult<()> {
+    let mut queue = outgoing_links.iter().copied().collect::<VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+
+    while let Some(current_id) = queue.pop_front() {
+        if !visited.insert(current_id) {
+            continue;
+        }
+
+        if current_id == node_id {
+            return Err(KernelError::Constraint(format!(
+                "node {node_id} cannot participate in a link cycle"
+            )));
+        }
+
+        for next_id in repository.list_outgoing_links(current_id)? {
+            queue.push_back(next_id);
+        }
+    }
+
+    Ok(())
 }
 
 pub fn move_node<R: WriteRepository>(
@@ -166,16 +197,16 @@ pub fn create_lookup_key(raw_value: &str) -> KernelResult<LookupKey> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use memoryroam_domain::{IncomingLinkRecord, LookupCandidate, ReadRepository, StoredNode};
+    use std::collections::BTreeMap;
 
     use super::*;
+    use memoryroam_domain::{LookupCandidate, ReadRepository, StoredNode};
 
     #[derive(Default)]
     struct FakeRepository {
         existing: BTreeMap<NodeId, StoredNode>,
         aliases: BTreeMap<String, Vec<NodeId>>,
+        outgoing: BTreeMap<NodeId, Vec<NodeId>>,
         created: Vec<NewNodeRecord>,
         updated: Vec<(NodeId, ContentLine, LookupKey, Vec<NodeId>)>,
         next_created_id: i64,
@@ -190,7 +221,14 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn list_incoming_links(&self, _node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+        fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            Ok(self.outgoing.get(&node_id).cloned().unwrap_or_default())
+        }
+
+        fn list_incoming_links(
+            &self,
+            _node_id: NodeId,
+        ) -> KernelResult<Vec<memoryroam_domain::IncomingLinkRecord>> {
             Ok(Vec::new())
         }
 
@@ -273,6 +311,7 @@ mod tests {
                         .or_default()
                         .push(node_id);
                 }
+                self.outgoing.insert(node_id, node.outgoing_links.clone());
                 created_ids.push(node_id);
             }
             Ok(created_ids)
@@ -285,6 +324,7 @@ mod tests {
             lookup_key: &LookupKey,
             outgoing_links: &[NodeId],
         ) -> KernelResult<()> {
+            self.outgoing.insert(node_id, outgoing_links.to_vec());
             self.updated.push((
                 node_id,
                 content.clone(),
@@ -300,6 +340,7 @@ mod tests {
 
         fn delete_node(&mut self, node_id: NodeId, _mode: DeleteMode) -> KernelResult<()> {
             self.existing.remove(&node_id);
+            self.outgoing.remove(&node_id);
             Ok(())
         }
 
@@ -399,6 +440,32 @@ mod tests {
 
         let error = update_node(&mut repository, node_id, "See {{Topic}}")
             .expect_err("self-referential updates should fail");
+
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn update_node_rejects_indirect_link_cycles() {
+        let mut repository = FakeRepository::default();
+        let first_id = NodeId::new(1).expect("valid test id");
+        let second_id = NodeId::new(2).expect("valid test id");
+
+        repository
+            .existing
+            .insert(first_id, stored_node(1, "First"));
+        repository
+            .existing
+            .insert(second_id, stored_node(2, "Second"));
+        repository
+            .aliases
+            .insert(String::from("First"), vec![first_id]);
+        repository
+            .aliases
+            .insert(String::from("Second"), vec![second_id]);
+        repository.outgoing.insert(first_id, vec![second_id]);
+
+        let error = update_node(&mut repository, second_id, "Back {{First}}")
+            .expect_err("indirect cycles should be rejected");
 
         assert!(matches!(error, KernelError::Constraint(_)));
     }
