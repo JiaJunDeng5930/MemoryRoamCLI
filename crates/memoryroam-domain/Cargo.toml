@@ -2,6 +2,9 @@
 name = "memoryroam-domain"
 version = "0.1.0"
 edition = "2024"
+description = "Domain types and repository contracts for MemoryRoam."
+readme = "README.md"
+repository = "https://github.com/JiaJunDeng5930/MemoryRoamCLI"
 
 [dependencies]
 thiserror = "2.0.17"

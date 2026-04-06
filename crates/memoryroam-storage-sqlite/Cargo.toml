@@ -2,6 +2,9 @@
 name = "memoryroam-storage-sqlite"
 version = "0.1.0"
 edition = "2024"
+description = "SQLite storage backend for MemoryRoam."
+readme = "README.md"
+repository = "https://github.com/JiaJunDeng5930/MemoryRoamCLI"
 
 [dependencies]
 memoryroam-domain = { path = "../memoryroam-domain" }
