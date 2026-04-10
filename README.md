@@ -3,6 +3,33 @@
 MemoryRoamCLI is a local-first structured note kernel backed by a single SQLite file.
 Each command starts a fresh process, opens the database file, performs one operation, prints plain text output, and exits.
 
+## Install
+
+Published builds are distributed through GitHub Releases.
+The repository does not have a tagged release yet, so the release-based install commands below will start working after the first `vX.Y.Z` release is published.
+
+Install the latest published release on macOS or Linux:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases/latest/download/memoryroam-cli-installer.sh | sh
+```
+
+Install the latest published release on Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases/latest/download/memoryroam-cli-installer.ps1 | iex"
+```
+
+If you prefer a manual install, download a platform archive from the [Releases](https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases) page.
+Each archive contains the `memoryroam` executable.
+
+Until the first tagged release exists, use a source checkout:
+
+```bash
+cargo build --bin memoryroam
+./target/debug/memoryroam --help
+```
+
 ## Workspace Layout
 
 - `crates/memoryroam-cli`: command-line entrypoint and text output.
@@ -135,3 +162,8 @@ cargo run --bin memoryroam -- --db notes.sqlite3 alias remove --id 1 --text "top
 - [`memoryroam-write`](./crates/memoryroam-write/README.md)
 - [`memoryroam-storage-sqlite`](./crates/memoryroam-storage-sqlite/README.md)
 - [`memoryroam-cli`](./crates/memoryroam-cli/README.md)
+
+## Maintainer Release Flow
+
+Push a `vX.Y.Z` git tag after the release commit has landed on `main`.
+The GitHub Actions release workflow will build the platform archives, generate the installer scripts, and publish the GitHub Release.
