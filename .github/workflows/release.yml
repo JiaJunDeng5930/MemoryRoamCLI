@@ -60,6 +60,11 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Verify tagged commit is reachable from main
+        if: ${{ !github.event.pull_request }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
