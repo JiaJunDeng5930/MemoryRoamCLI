@@ -2,6 +2,33 @@
 
 `memoryroam-cli` is the executable package that exposes the MemoryRoam note kernel as a plain-text command-line interface.
 
+## Install
+
+Published builds are distributed through GitHub Releases.
+The repository does not have a tagged release yet, so the release-based install commands below will start working after the first `vX.Y.Z` release is published.
+
+Install the latest published release on macOS or Linux:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases/latest/download/memoryroam-cli-installer.sh | sh
+```
+
+Install the latest published release on Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases/latest/download/memoryroam-cli-installer.ps1 | iex"
+```
+
+If you prefer a manual install, download a platform archive from the [Releases](https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases) page.
+Each archive contains the `memoryroam` executable.
+
+Until the first tagged release exists, use a source checkout:
+
+```bash
+cargo build --bin memoryroam
+./target/debug/memoryroam --help
+```
+
 ## Build
 
 ```bash
