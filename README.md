@@ -8,7 +8,7 @@ Each command starts a fresh process, opens the database file, performs one opera
 Published builds are distributed through GitHub Releases.
 The repository does not have a tagged release yet, so the release-based install commands below will start working after the first `vX.Y.Z` release is published.
 
-Install the latest published release on macOS or Linux:
+Install the latest published release on macOS or glibc-based Linux:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases/latest/download/memoryroam-cli-installer.sh | sh
@@ -22,6 +22,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/JiaJunDeng5930/Mem
 
 If you prefer a manual install, download a platform archive from the [Releases](https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases) page.
 Each archive contains the `memoryroam` executable.
+musl-based Linux distributions such as Alpine are not covered by the current release artifacts.
 
 Until the first tagged release exists, use a source checkout:
 
