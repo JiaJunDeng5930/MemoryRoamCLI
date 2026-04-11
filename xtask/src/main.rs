@@ -25,6 +25,7 @@ const EXCLUDE_DIRS: &[&str] = &[
     "venv",
 ];
 const EXCLUDE_FILES: &[&str] = &[
+    ".git",
     ".env",
     ".env.*",
     "*.key",
@@ -243,5 +244,33 @@ fn upsert_index_block(current: &str, rendered_block: &str) -> Result<String, Str
         _ => Err(String::from(
             "AGENTS.md index markers must appear at most once each",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_directory_entries;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn collect_directory_entries_excludes_git_file_in_worktree_layout() {
+        let temp_dir = TempDir::new().expect("temp dir should exist");
+        let root = temp_dir.path();
+
+        fs::write(root.join(".git"), "gitdir: /tmp/worktree")
+            .expect("worktree git file should be created");
+        fs::write(root.join("AGENTS.md"), "index").expect("agents file should be created");
+
+        let mut entries = BTreeMap::new();
+        collect_directory_entries(root, ".", &mut entries)
+            .expect("directory collection should succeed");
+
+        let root_entries = entries.get(".").expect("root entry should exist");
+        assert!(
+            !root_entries.iter().any(|entry| entry == ".git"),
+            "worktree .git file should be excluded from the project index",
+        );
     }
 }
