@@ -79,6 +79,12 @@ load_cargo_environment() {
   fi
 }
 
+ensure_cargo_bin_on_path() {
+  if [[ -d "$HOME/.cargo/bin" ]]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+  fi
+}
+
 install_rustup_if_missing() {
   if command -v rustup >/dev/null 2>&1; then
     return
@@ -125,6 +131,7 @@ main() {
 
   load_cargo_environment
   install_rustup_if_missing
+  ensure_cargo_bin_on_path
   load_cargo_environment
 
   require_command rustup
