@@ -13,6 +13,10 @@ fail() {
   exit 1
 }
 
+warn() {
+  printf 'warning: %s\n' "$1" >&2
+}
+
 require_command() {
   local command_name="$1"
 
@@ -34,6 +38,7 @@ ensure_git_repository_root() {
 ensure_python_venv() {
   local probe_dir
 
+  require_command mktemp
   probe_dir="$(mktemp -d)"
   if ! python3 -m venv "$probe_dir/venv" >/dev/null 2>&1; then
     rm -rf "$probe_dir"
@@ -45,6 +50,16 @@ ensure_python_venv() {
 
 user_bin_dir() {
   python3 -c 'import site; print(site.getuserbase())'
+}
+
+user_bin_on_path() {
+  local user_bin
+
+  user_bin="$(user_bin_dir)/bin"
+  case ":$PATH:" in
+    *":$user_bin:"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 load_cargo_environment() {
@@ -82,6 +97,7 @@ install_pre_commit() {
     return
   fi
 
+  ensure_python_venv
   shared_install_root="${XDG_DATA_HOME:-$HOME/.local/share}/memoryroam-cli"
   shared_virtualenv_dir="$shared_install_root/pre-commit-venv"
   user_bin="$(user_bin_dir)/bin"
@@ -98,6 +114,10 @@ install_pre_commit() {
     > "$wrapper_path"
   chmod +x "$wrapper_path"
   PRE_COMMIT_COMMAND="$shared_virtualenv_dir/bin/pre-commit"
+
+  if ! user_bin_on_path; then
+    warn "pre-commit was installed to $wrapper_path, but $user_bin is not on PATH in this shell"
+  fi
 }
 
 install_git_hooks() {
@@ -121,8 +141,6 @@ main() {
   require_command git
   require_command curl
   require_command python3
-  require_command mktemp
-  ensure_python_venv
 
   ensure_git_repository_root
   install_rustup_if_missing
