@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+PRE_COMMIT_COMMAND=""
+
 log() {
   printf '==> %s\n' "$1"
 }
@@ -35,6 +37,31 @@ ensure_python_venv() {
   fi
 }
 
+user_bin_dir() {
+  python3 -m site --user-base
+}
+
+ensure_user_bin_on_path() {
+  local user_base
+
+  user_base="$(user_bin_dir)"
+
+  case ":$PATH:" in
+    *":$user_base/bin:"*) ;;
+    *) fail "$user_base/bin must be on PATH" ;;
+  esac
+}
+
+git_common_dir() {
+  local common_dir
+
+  common_dir="$(git rev-parse --git-common-dir)"
+  (
+    cd "$common_dir"
+    pwd
+  )
+}
+
 load_cargo_environment() {
   if [[ -f "$HOME/.cargo/env" ]]; then
     # shellcheck disable=SC1090
@@ -57,19 +84,37 @@ install_rust_toolchain() {
 }
 
 install_pre_commit() {
-  local virtualenv_dir=".workpad/bootstrap-venv"
+  local existing_pre_commit
+  local shared_virtualenv_dir
+  local user_base
+  local wrapper_path
 
-  log "Installing pre-commit into $virtualenv_dir"
-  mkdir -p .workpad
-  python3 -m venv "$virtualenv_dir"
-  "$virtualenv_dir/bin/python" -m pip install pre-commit
+  existing_pre_commit="$(command -v pre-commit || true)"
+  if [[ -n "$existing_pre_commit" ]]; then
+    PRE_COMMIT_COMMAND="$existing_pre_commit"
+    log "Using existing pre-commit at $PRE_COMMIT_COMMAND"
+    return
+  fi
+
+  shared_virtualenv_dir="$(git_common_dir)/bootstrap-pre-commit-venv"
+  user_base="$(user_bin_dir)"
+  wrapper_path="$user_base/bin/pre-commit"
+
+  log "Installing pre-commit into $shared_virtualenv_dir"
+  mkdir -p "$user_base/bin"
+  python3 -m venv "$shared_virtualenv_dir"
+  "$shared_virtualenv_dir/bin/python" -m pip install pre-commit
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    "exec \"$shared_virtualenv_dir/bin/pre-commit\" \"\$@\"" \
+    > "$wrapper_path"
+  chmod +x "$wrapper_path"
+  PRE_COMMIT_COMMAND="$wrapper_path"
 }
 
 install_git_hooks() {
-  local virtualenv_dir=".workpad/bootstrap-venv"
-
   log "Installing repository hooks"
-  "$virtualenv_dir/bin/python" -m pre_commit install --install-hooks
+  "$PRE_COMMIT_COMMAND" install --install-hooks
 }
 
 configure_repository_git_settings() {
@@ -89,6 +134,7 @@ main() {
   require_command curl
   require_command python3
   ensure_python_venv
+  ensure_user_bin_on_path
 
   ensure_git_repository_root
   install_rustup_if_missing
