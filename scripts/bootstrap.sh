@@ -74,6 +74,11 @@ install_rustup_if_missing() {
     return
   fi
 
+  if [[ -x "$HOME/.cargo/bin/rustup" ]]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+    return
+  fi
+
   log "Installing rustup"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 }
@@ -91,7 +96,9 @@ install_pre_commit() {
   local wrapper_path
 
   existing_pre_commit="$(command -v pre-commit || true)"
-  if [[ -n "$existing_pre_commit" ]] && "$existing_pre_commit" --version >/dev/null 2>&1; then
+  if [[ -n "$existing_pre_commit" ]] \
+    && "$existing_pre_commit" --version >/dev/null 2>&1 \
+    && [[ -z "${VIRTUAL_ENV:-}" || "$existing_pre_commit" != "$VIRTUAL_ENV/"* ]]; then
     PRE_COMMIT_COMMAND="$existing_pre_commit"
     log "Using existing pre-commit at $PRE_COMMIT_COMMAND"
     return
@@ -143,6 +150,7 @@ main() {
   require_command python3
 
   ensure_git_repository_root
+  load_cargo_environment
   install_rustup_if_missing
   load_cargo_environment
   require_command rustup
