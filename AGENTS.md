@@ -28,7 +28,7 @@ Check whether the embedded project index is current with `cargo xtask agents-md-
 |IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning for repository-specific behavior, structure, and APIs.
 |exclude_dirs:{**/.workpad/,**/target/}
 |exclude_files:{}
-|.:{.cargo/,.github/,.gitignore,.pre-commit-config.yaml,AGENTS.md,Cargo.lock,Cargo.toml,README.md,crates/,dist-workspace.toml,rust-toolchain.toml,xtask/}
+|.:{.cargo/,.github/,.gitignore,.pre-commit-config.yaml,AGENTS.md,Cargo.lock,Cargo.toml,README.md,crates/,dist-workspace.toml,rust-toolchain.toml,scripts/,xtask/}
 |.cargo:{config.toml}
 |.github:{workflows/}
 |.github/workflows:{quality.yml,release.yml}
@@ -44,6 +44,7 @@ Check whether the embedded project index is current with `cargo xtask agents-md-
 |crates/memoryroam-storage-sqlite/src:{lib.rs}
 |crates/memoryroam-write:{Cargo.toml,README.md,src/}
 |crates/memoryroam-write/src:{lib.rs}
+|scripts:{bootstrap.sh}
 |xtask:{Cargo.toml,src/}
 |xtask/src:{main.rs}
 ```
