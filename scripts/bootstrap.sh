@@ -29,9 +29,9 @@ ensure_git_repository_root() {
   cd "$repository_root"
 }
 
-ensure_python_pip() {
-  if ! python3 -m pip --version >/dev/null 2>&1; then
-    fail "python3 -m pip is required"
+ensure_python_venv() {
+  if ! python3 -m venv --help >/dev/null 2>&1; then
+    fail "python3 venv support is required"
   fi
 }
 
@@ -54,17 +54,22 @@ install_rustup_if_missing() {
 install_rust_toolchain() {
   log "Installing Rust toolchain and required components"
   rustup toolchain install stable --profile minimal --component clippy --component rustfmt
-  rustup default stable
 }
 
 install_pre_commit() {
-  log "Installing pre-commit"
-  python3 -m pip install --user pre-commit
+  local virtualenv_dir=".workpad/bootstrap-venv"
+
+  log "Installing pre-commit into $virtualenv_dir"
+  mkdir -p .workpad
+  python3 -m venv "$virtualenv_dir"
+  "$virtualenv_dir/bin/python" -m pip install pre-commit
 }
 
 install_git_hooks() {
+  local virtualenv_dir=".workpad/bootstrap-venv"
+
   log "Installing repository hooks"
-  python3 -m pre_commit install --install-hooks
+  "$virtualenv_dir/bin/python" -m pre_commit install --install-hooks
 }
 
 configure_repository_git_settings() {
@@ -83,7 +88,7 @@ main() {
   require_command git
   require_command curl
   require_command python3
-  ensure_python_pip
+  ensure_python_venv
 
   ensure_git_repository_root
   install_rustup_if_missing
