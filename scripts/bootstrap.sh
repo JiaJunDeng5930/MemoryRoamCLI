@@ -37,31 +37,6 @@ ensure_python_venv() {
   fi
 }
 
-user_bin_dir() {
-  python3 -c 'import site; print(site.getuserbase())'
-}
-
-ensure_user_bin_on_path() {
-  local user_base
-
-  user_base="$(user_bin_dir)"
-
-  case ":$PATH:" in
-    *":$user_base/bin:"*) ;;
-    *) fail "$user_base/bin must be on PATH" ;;
-  esac
-}
-
-git_common_dir() {
-  local common_dir
-
-  common_dir="$(git rev-parse --git-common-dir)"
-  (
-    cd "$common_dir"
-    pwd
-  )
-}
-
 load_cargo_environment() {
   if [[ -f "$HOME/.cargo/env" ]]; then
     # shellcheck disable=SC1090
@@ -85,24 +60,28 @@ install_rust_toolchain() {
 
 install_pre_commit() {
   local existing_pre_commit
+  local shared_install_root
   local shared_virtualenv_dir
-  local user_base
   local wrapper_path
 
   existing_pre_commit="$(command -v pre-commit || true)"
-  if [[ -n "$existing_pre_commit" ]]; then
+  if [[ -n "$existing_pre_commit" ]] && "$existing_pre_commit" --version >/dev/null 2>&1; then
     PRE_COMMIT_COMMAND="$existing_pre_commit"
     log "Using existing pre-commit at $PRE_COMMIT_COMMAND"
     return
   fi
 
-  shared_virtualenv_dir="$(git_common_dir)/bootstrap-pre-commit-venv"
-  ensure_user_bin_on_path
-  user_base="$(user_bin_dir)"
-  wrapper_path="$user_base/bin/pre-commit"
+  shared_install_root="${XDG_DATA_HOME:-$HOME/.local/share}/memoryroam-cli"
+  shared_virtualenv_dir="$shared_install_root/pre-commit-venv"
+
+  if [[ -n "$existing_pre_commit" ]]; then
+    wrapper_path="$existing_pre_commit"
+  else
+    wrapper_path="$(dirname "$(command -v cargo)")/pre-commit"
+  fi
 
   log "Installing pre-commit into $shared_virtualenv_dir"
-  mkdir -p "$user_base/bin"
+  mkdir -p "$shared_install_root"
   python3 -m venv "$shared_virtualenv_dir"
   "$shared_virtualenv_dir/bin/python" -m pip install pre-commit
   printf '%s\n' \
