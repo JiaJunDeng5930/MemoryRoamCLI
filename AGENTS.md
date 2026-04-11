@@ -26,8 +26,8 @@ Check whether the embedded project index is current with `cargo xtask agents-md-
 ```text
 [Project Index]|root:.
 |IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning for repository-specific behavior, structure, and APIs.
-|exclude_dirs:{.git,.next,.mypy_cache,.pytest_cache,.venv,.workpad,__pycache__,build,coverage,dist,node_modules,target,venv}
-|exclude_files:{.git,.env,.env.*,*.key,*.p12,*.pem,*.pfx,id_ed25519*,id_rsa*}
+|exclude_dirs:{**/.workpad/,**/target/}
+|exclude_files:{}
 |.:{.cargo/,.github/,.gitignore,.pre-commit-config.yaml,AGENTS.md,Cargo.lock,Cargo.toml,README.md,crates/,dist-workspace.toml,rust-toolchain.toml,xtask/}
 |.cargo:{config.toml}
 |.github:{workflows/}
