@@ -136,10 +136,13 @@ main() {
   load_cargo_environment
 
   require_command rustup
-  require_command cargo
-  require_command pre-commit
 
   install_rust_toolchain
+  ensure_cargo_bin_on_path
+  load_cargo_environment
+
+  require_command cargo
+  require_command pre-commit
   install_git_hooks
   configure_repository_git_settings
   prefetch_cargo_dependencies
