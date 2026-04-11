@@ -19,6 +19,12 @@ require_command() {
   fi
 }
 
+ensure_non_root_user() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    fail "run this script as a normal user, not as root"
+  fi
+}
+
 ensure_repository_root() {
   local repository_root
 
@@ -116,6 +122,7 @@ prefetch_cargo_dependencies() {
 
 main() {
   require_command git
+  ensure_non_root_user
 
   ensure_repository_root
   ensure_ubuntu_2404
