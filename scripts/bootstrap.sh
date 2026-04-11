@@ -35,7 +35,7 @@ ensure_repository_root() {
   cd "$repository_root"
 }
 
-ensure_ubuntu_2404() {
+ensure_supported_ubuntu() {
   if [[ ! -r /etc/os-release ]]; then
     fail "unable to read /etc/os-release"
   fi
@@ -44,12 +44,13 @@ ensure_ubuntu_2404() {
   . /etc/os-release
 
   if [[ "${ID:-}" != "ubuntu" ]]; then
-    fail "this script only supports Ubuntu 24.04"
+    fail "this script only supports Ubuntu"
   fi
 
-  if [[ "${VERSION_ID:-}" != "24.04" ]]; then
-    fail "this script only supports Ubuntu 24.04"
-  fi
+  case "${VERSION_ID:-}" in
+    22.04 | 24.04) ;;
+    *) fail "this script only supports Ubuntu 22.04 and 24.04" ;;
+  esac
 }
 
 apt_get() {
@@ -126,7 +127,7 @@ main() {
   ensure_non_root_user
 
   ensure_repository_root
-  ensure_ubuntu_2404
+  ensure_supported_ubuntu
   install_system_packages
 
   load_cargo_environment
