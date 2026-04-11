@@ -53,13 +53,8 @@ ensure_ubuntu_2404() {
 }
 
 apt_get() {
-  if [[ "${EUID}" -eq 0 ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get "$@"
-    return
-  fi
-
   require_command sudo
-  DEBIAN_FRONTEND=noninteractive sudo apt-get "$@"
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get "$@"
 }
 
 install_system_packages() {
