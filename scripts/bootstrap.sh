@@ -32,9 +32,19 @@ ensure_git_repository_root() {
 }
 
 ensure_python_venv() {
-  if ! python3 -m venv --help >/dev/null 2>&1; then
+  local probe_dir
+
+  probe_dir="$(mktemp -d)"
+  if ! python3 -m venv "$probe_dir/venv" >/dev/null 2>&1; then
+    rm -rf "$probe_dir"
     fail "python3 venv support is required"
   fi
+
+  rm -rf "$probe_dir"
+}
+
+user_bin_dir() {
+  python3 -c 'import site; print(site.getuserbase())'
 }
 
 load_cargo_environment() {
@@ -62,6 +72,7 @@ install_pre_commit() {
   local existing_pre_commit
   local shared_install_root
   local shared_virtualenv_dir
+  local user_bin
   local wrapper_path
 
   existing_pre_commit="$(command -v pre-commit || true)"
@@ -73,15 +84,12 @@ install_pre_commit() {
 
   shared_install_root="${XDG_DATA_HOME:-$HOME/.local/share}/memoryroam-cli"
   shared_virtualenv_dir="$shared_install_root/pre-commit-venv"
-
-  if [[ -n "$existing_pre_commit" ]]; then
-    wrapper_path="$existing_pre_commit"
-  else
-    wrapper_path="$(dirname "$(command -v cargo)")/pre-commit"
-  fi
+  user_bin="$(user_bin_dir)/bin"
+  wrapper_path="$user_bin/pre-commit"
 
   log "Installing pre-commit into $shared_virtualenv_dir"
   mkdir -p "$shared_install_root"
+  mkdir -p "$user_bin"
   python3 -m venv "$shared_virtualenv_dir"
   "$shared_virtualenv_dir/bin/python" -m pip install pre-commit
   printf '%s\n' \
@@ -89,7 +97,7 @@ install_pre_commit() {
     "exec \"$shared_virtualenv_dir/bin/pre-commit\" \"\$@\"" \
     > "$wrapper_path"
   chmod +x "$wrapper_path"
-  PRE_COMMIT_COMMAND="$wrapper_path"
+  PRE_COMMIT_COMMAND="$shared_virtualenv_dir/bin/pre-commit"
 }
 
 install_git_hooks() {
@@ -113,6 +121,7 @@ main() {
   require_command git
   require_command curl
   require_command python3
+  require_command mktemp
   ensure_python_venv
 
   ensure_git_repository_root
