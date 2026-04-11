@@ -7,3 +7,6 @@ edition = "2024"
 dist = false
 
 [dependencies]
+
+[dev-dependencies]
+tempfile = "3.23.0"

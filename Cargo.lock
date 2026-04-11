@@ -848,6 +848,9 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "zmij"
