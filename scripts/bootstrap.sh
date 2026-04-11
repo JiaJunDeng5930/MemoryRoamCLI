@@ -38,6 +38,7 @@ ensure_git_repository_root() {
 ensure_python_venv() {
   local probe_dir
 
+  require_command python3
   require_command mktemp
   probe_dir="$(mktemp -d)"
   if ! python3 -m venv "$probe_dir/venv" >/dev/null 2>&1; then
@@ -49,6 +50,7 @@ ensure_python_venv() {
 }
 
 user_bin_dir() {
+  require_command python3
   python3 -c 'import site; print(site.getuserbase())'
 }
 
@@ -79,6 +81,7 @@ install_rustup_if_missing() {
     return
   fi
 
+  require_command curl
   log "Installing rustup"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 }
@@ -146,8 +149,6 @@ prefetch_cargo_dependencies() {
 
 main() {
   require_command git
-  require_command curl
-  require_command python3
 
   ensure_git_repository_root
   load_cargo_environment
