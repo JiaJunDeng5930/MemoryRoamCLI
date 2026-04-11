@@ -53,7 +53,7 @@ apt_get() {
   fi
 
   require_command sudo
-  DEBIAN_FRONTEND=noninteractive sudo -n apt-get "$@"
+  DEBIAN_FRONTEND=noninteractive sudo apt-get "$@"
 }
 
 install_system_packages() {
