@@ -38,7 +38,7 @@ ensure_python_venv() {
 }
 
 user_bin_dir() {
-  python3 -m site --user-base
+  python3 -c 'import site; print(site.getuserbase())'
 }
 
 ensure_user_bin_on_path() {
@@ -97,6 +97,7 @@ install_pre_commit() {
   fi
 
   shared_virtualenv_dir="$(git_common_dir)/bootstrap-pre-commit-venv"
+  ensure_user_bin_on_path
   user_base="$(user_bin_dir)"
   wrapper_path="$user_base/bin/pre-commit"
 
@@ -134,7 +135,6 @@ main() {
   require_command curl
   require_command python3
   ensure_python_venv
-  ensure_user_bin_on_path
 
   ensure_git_repository_root
   install_rustup_if_missing
