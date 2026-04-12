@@ -936,6 +936,48 @@ impl WriteRepository for SqliteStore {
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(node_id)
     }
+
+    fn create_note_in_daily_note(
+        &mut self,
+        note_date: &str,
+        node: &NewNodeRecord,
+    ) -> KernelResult<NodeId> {
+        let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
+        ensure_schema_initialized(&transaction)?;
+
+        let note_node_id = match find_daily_note_from_handle(&transaction, note_date)? {
+            Some(record) => record.node_id,
+            None => {
+                let content = ContentLine::parse(note_date)
+                    .map_err(|error| KernelError::Input(error.to_string()))?;
+                let lookup_key = LookupKey::from_content(&content)
+                    .map_err(|error| KernelError::Input(error.to_string()))?;
+                let note_node = NewNodeRecord {
+                    content,
+                    lookup_key,
+                    outgoing_links: Vec::new(),
+                    aliases: Vec::new(),
+                };
+                let note_node_id = insert_top_level_node(&transaction, &note_node)?;
+                transaction
+                    .execute(
+                        "INSERT INTO daily_notes (note_date, node_id) VALUES (?1, ?2)",
+                        params![note_date, note_node_id.value()],
+                    )
+                    .map_err(map_sqlite_error)?;
+                note_node_id
+            }
+        };
+
+        let node_id = insert_single_node(&transaction, Placement::LastChildOf(note_node_id), node)?;
+        let repository = TransactionRepository {
+            transaction: &transaction,
+        };
+        ensure_no_link_cycle(&repository, node_id)?;
+
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(node_id)
+    }
 }
 
 trait SqlHandle {

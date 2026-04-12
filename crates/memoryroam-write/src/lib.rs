@@ -205,7 +205,10 @@ pub fn move_node<R: WriteRepository>(
     {
         let target_id = placement.target_id();
         let target_is_root = match target_id {
-            Some(target_id) => repository.is_root_node(target_id)?,
+            Some(target_id) => {
+                repository.is_root_node(target_id)?
+                    && matches!(placement, Placement::Before(_) | Placement::After(_))
+            }
             None => false,
         };
         if !target_is_root {
@@ -451,32 +454,27 @@ impl<R: WriteRepository> ReadRepository for PendingUpdateRepository<'_, R> {
         &self,
         key: &LookupKey,
     ) -> KernelResult<Vec<memoryroam_domain::LookupCandidate>> {
-        let mut candidates = self
-            .base
-            .lookup_candidates(key)?
-            .into_iter()
-            .filter_map(|mut candidate| {
-                let Some(update) = self.pending_updates.get(&candidate.node_id) else {
-                    return Some(Ok(candidate));
-                };
+        let mut candidates = Vec::new();
+        for mut candidate in self.base.lookup_candidates(key)? {
+            let Some(update) = self.pending_updates.get(&candidate.node_id) else {
+                candidates.push(candidate);
+                continue;
+            };
 
-                let alias_matches = self
-                    .base
-                    .list_aliases(candidate.node_id)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|alias| LookupKey::from_alias(&alias).ok())
-                    .any(|alias_key| alias_key.as_str() == key.as_str());
-                let updated_content_matches = update.lookup_key.as_str() == key.as_str();
-                if !alias_matches && !updated_content_matches {
-                    return None;
-                }
+            let alias_matches = self
+                .base
+                .list_aliases(candidate.node_id)?
+                .into_iter()
+                .filter_map(|alias| LookupKey::from_alias(&alias).ok())
+                .any(|alias_key| alias_key.as_str() == key.as_str());
+            let updated_content_matches = update.lookup_key.as_str() == key.as_str();
+            if !alias_matches && !updated_content_matches {
+                continue;
+            }
 
-                candidate.content = update.content.clone();
-                Some(Ok(candidate))
-            })
-            .collect::<KernelResult<Vec<_>>>()?;
+            candidate.content = update.content.clone();
+            candidates.push(candidate);
+        }
 
         for (node_id, update) in self.pending_updates {
             let already_present = candidates
@@ -813,6 +811,19 @@ mod tests {
             };
             self.create_nodes(Placement::TopLevelLast, &[node])
                 .map(|mut ids| ids.remove(0))
+        }
+
+        fn create_note_in_daily_note(
+            &mut self,
+            note_date: &str,
+            node: &NewNodeRecord,
+        ) -> KernelResult<NodeId> {
+            let note_node_id = self.create_daily_note_node(note_date)?;
+            self.create_nodes(
+                Placement::LastChildOf(note_node_id),
+                std::slice::from_ref(node),
+            )
+            .map(|mut ids| ids.remove(0))
         }
     }
 

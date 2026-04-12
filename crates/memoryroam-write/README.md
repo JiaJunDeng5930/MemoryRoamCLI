@@ -54,6 +54,7 @@ impl WriteRepository for Repo {
     fn remove_alias(&mut self, _node_id: NodeId, _alias: &AliasText) -> KernelResult<()> { todo!() }
     fn create_root_node(&mut self, _node: &NewNodeRecord) -> KernelResult<NodeId> { todo!() }
     fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> { todo!() }
+    fn create_note_in_daily_note(&mut self, _note_date: &str, _node: &NewNodeRecord) -> KernelResult<NodeId> { todo!() }
 }
 
 let mut repo = Repo;

@@ -79,24 +79,7 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
     validate_day_date(note_date, "invalid daily note date")?;
     let node = build_new_node(repository, raw_content)?;
     let rendered_content = render_storage_content(repository, &node.content)?;
-    let note_node_id = match repository.find_daily_note(note_date)? {
-        Some(record) => record.node_id,
-        None => match repository.create_daily_note_node(note_date) {
-            Ok(node_id) => node_id,
-            Err(KernelError::Constraint(_)) => repository
-                .find_daily_note(note_date)?
-                .map(|record| record.node_id)
-                .ok_or(KernelError::Constraint(format!(
-                    "daily note {note_date} could not be created"
-                )))?,
-            Err(error) => return Err(error),
-        },
-    };
-
-    let node_id = repository.create_nodes(
-        memoryroam_domain::Placement::LastChildOf(note_node_id),
-        &[node],
-    )?[0];
+    let node_id = repository.create_note_in_daily_note(note_date, &node)?;
     let created = repository
         .get_node(node_id)?
         .ok_or(KernelError::StorageCorruption(format!(
@@ -267,18 +250,17 @@ pub fn read_node_context<R: ReadRepository>(
     let soft_limit = budget_target.saturating_add(300);
     let mut used_tokens = current_tokens;
 
-    let (prev_candidates, next_candidates) = if repository.is_daily_note_node(node_id)? {
-        daily_note_neighbors(repository, node_id)?
-    } else if repository.is_root_node(node_id)? {
-        root_neighbors(repository, node_id)?
-    } else if node.parent_id.is_some() {
-        (
-            collect_previous_siblings(repository, &node)?,
-            collect_next_siblings(repository, &node)?,
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let (prev_candidates, next_candidates) =
+        if repository.is_daily_note_node(node_id)? || repository.is_root_node(node_id)? {
+            top_level_neighbors(repository, node_id)?
+        } else if node.parent_id.is_some() {
+            (
+                collect_previous_siblings(repository, &node)?,
+                collect_next_siblings(repository, &node)?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
     let sibling_selection = choose_siblings(
         repository,
@@ -444,59 +426,24 @@ fn collect_next_siblings<R: ReadRepository>(
     Ok(siblings)
 }
 
-fn daily_note_neighbors<R: ReadRepository>(
+fn top_level_neighbors<R: ReadRepository>(
     repository: &R,
     node_id: NodeId,
 ) -> KernelResult<(Vec<StoredNode>, Vec<StoredNode>)> {
-    let daily_notes = repository.list_daily_notes()?;
-    let current_index = daily_notes
-        .iter()
-        .position(|record| record.node_id == node_id)
-        .ok_or(KernelError::StorageCorruption(format!(
-            "missing daily note membership for node {node_id}"
-        )))?;
-
-    let previous = daily_notes[..current_index]
-        .iter()
-        .rev()
-        .map(|record| {
-            repository
-                .get_node(record.node_id)?
-                .ok_or(KernelError::StorageCorruption(format!(
-                    "missing daily note node {}",
-                    record.node_id
-                )))
-        })
-        .collect::<KernelResult<Vec<_>>>()?;
-    let next = daily_notes[current_index + 1..]
-        .iter()
-        .map(|record| {
-            repository
-                .get_node(record.node_id)?
-                .ok_or(KernelError::StorageCorruption(format!(
-                    "missing daily note node {}",
-                    record.node_id
-                )))
-        })
-        .collect::<KernelResult<Vec<_>>>()?;
-
-    Ok((previous, next))
-}
-
-fn root_neighbors<R: ReadRepository>(
-    repository: &R,
-    node_id: NodeId,
-) -> KernelResult<(Vec<StoredNode>, Vec<StoredNode>)> {
-    let root_nodes = repository.list_root_nodes()?;
-    let current_index = root_nodes
+    let top_level_nodes = repository.list_children(None)?;
+    let current_index = top_level_nodes
         .iter()
         .position(|node| node.id == node_id)
         .ok_or(KernelError::StorageCorruption(format!(
             "missing root membership for node {node_id}"
         )))?;
 
-    let previous = root_nodes[..current_index].iter().rev().cloned().collect();
-    let next = root_nodes[current_index + 1..].to_vec();
+    let previous = top_level_nodes[..current_index]
+        .iter()
+        .rev()
+        .cloned()
+        .collect();
+    let next = top_level_nodes[current_index + 1..].to_vec();
     Ok((previous, next))
 }
 
@@ -1001,6 +948,31 @@ mod tests {
 
             panic!("note_today should retry by re-reading the daily note");
         }
+
+        fn create_note_in_daily_note(
+            &mut self,
+            note_date: &str,
+            node: &NewNodeRecord,
+        ) -> KernelResult<NodeId> {
+            let note_node_id = match self.find_daily_note(note_date)? {
+                Some(record) => record.node_id,
+                None => match self.create_daily_note_node(note_date) {
+                    Ok(node_id) => node_id,
+                    Err(KernelError::Constraint(_)) => self
+                        .find_daily_note(note_date)?
+                        .map(|record| record.node_id)
+                        .ok_or(KernelError::Constraint(String::from(
+                            "daily note could not be created",
+                        )))?,
+                    Err(error) => return Err(error),
+                },
+            };
+            self.create_nodes(
+                Placement::LastChildOf(note_node_id),
+                std::slice::from_ref(node),
+            )
+            .map(|mut ids| ids.remove(0))
+        }
     }
 
     #[test]
@@ -1183,6 +1155,15 @@ mod tests {
 
         fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> {
             Ok(NodeId::new(1).expect("valid test id"))
+        }
+
+        fn create_note_in_daily_note(
+            &mut self,
+            _note_date: &str,
+            _node: &NewNodeRecord,
+        ) -> KernelResult<NodeId> {
+            self.created_note = true;
+            Ok(NodeId::new(2).expect("valid test id"))
         }
     }
 
@@ -1401,6 +1382,14 @@ mod tests {
         }
 
         fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn create_note_in_daily_note(
+            &mut self,
+            _note_date: &str,
+            _node: &NewNodeRecord,
+        ) -> KernelResult<NodeId> {
             Err(KernelError::Storage(String::from("unused in test")))
         }
     }
@@ -1751,6 +1740,14 @@ mod tests {
 
         fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> {
             Ok(NodeId::new(1).expect("valid test id"))
+        }
+
+        fn create_note_in_daily_note(
+            &mut self,
+            _note_date: &str,
+            _node: &NewNodeRecord,
+        ) -> KernelResult<NodeId> {
+            Err(KernelError::Storage(String::from("unused in test")))
         }
     }
 
