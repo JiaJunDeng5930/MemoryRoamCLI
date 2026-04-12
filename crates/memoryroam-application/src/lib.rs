@@ -129,14 +129,13 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     repository: &mut R,
     raw_content: &str,
 ) -> KernelResult<RootCreateResult> {
-    let content =
-        ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
+    let content = normalize_root_content(raw_content)?;
     ensure_plain_text_root(&content)?;
     ensure_safe_root_label_text(content.as_str())?;
     let root = match repository.find_root_node_by_content(&content)? {
         Some(node) => node,
         None => {
-            let node = build_new_node(repository, raw_content)?;
+            let node = build_root_node(repository, &content)?;
             match repository.create_root_node(&node) {
                 Ok(node_id) => {
                     repository
@@ -261,6 +260,8 @@ pub fn read_node_context<R: ReadRepository>(
 
     let (prev_candidates, next_candidates) = if repository.is_daily_note_node(node_id)? {
         daily_note_neighbors(repository, node_id)?
+    } else if repository.is_root_node(node_id)? {
+        root_neighbors(repository, node_id)?
     } else if node.parent_id.is_some() {
         (
             collect_previous_siblings(repository, &node)?,
@@ -308,6 +309,19 @@ fn build_new_node<R: ReadRepository>(
     let content =
         ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
     let canonical = canonicalize_content(repository, &content)?;
+    Ok(memoryroam_domain::NewNodeRecord {
+        content: canonical.content,
+        lookup_key: canonical.lookup_key,
+        outgoing_links: canonical.outgoing_links,
+        aliases: Vec::new(),
+    })
+}
+
+fn build_root_node<R: ReadRepository>(
+    repository: &R,
+    content: &ContentLine,
+) -> KernelResult<memoryroam_domain::NewNodeRecord> {
+    let canonical = canonicalize_content(repository, content)?;
     Ok(memoryroam_domain::NewNodeRecord {
         content: canonical.content,
         lookup_key: canonical.lookup_key,
@@ -466,6 +480,23 @@ fn daily_note_neighbors<R: ReadRepository>(
     Ok((previous, next))
 }
 
+fn root_neighbors<R: ReadRepository>(
+    repository: &R,
+    node_id: NodeId,
+) -> KernelResult<(Vec<StoredNode>, Vec<StoredNode>)> {
+    let root_nodes = repository.list_root_nodes()?;
+    let current_index = root_nodes
+        .iter()
+        .position(|node| node.id == node_id)
+        .ok_or(KernelError::StorageCorruption(format!(
+            "missing root membership for node {node_id}"
+        )))?;
+
+    let previous = root_nodes[..current_index].iter().rev().cloned().collect();
+    let next = root_nodes[current_index + 1..].to_vec();
+    Ok((previous, next))
+}
+
 fn choose_siblings<R: ReadRepository>(
     repository: &R,
     prev_candidates: Vec<StoredNode>,
@@ -595,6 +626,10 @@ fn validate_day_date(note_date: &str, error_message: &str) -> KernelResult<()> {
         .map_err(|_| KernelError::Input(String::from(error_message)))
 }
 
+fn normalize_root_content(raw_content: &str) -> KernelResult<ContentLine> {
+    ContentLine::parse(raw_content.trim()).map_err(|error| KernelError::Input(error.to_string()))
+}
+
 fn normalized_root_lookup_text(content: &ContentLine) -> &str {
     content.as_str().trim()
 }
@@ -714,6 +749,14 @@ mod tests {
     }
 
     #[test]
+    fn create_root_trims_surrounding_whitespace() {
+        let mut store = store();
+
+        let result = create_root(&mut store, " Topic ").expect("root should be created");
+        assert_eq!(result.root.rendered_content, "Topic");
+    }
+
+    #[test]
     fn create_root_reuses_consistent_match_search_text() {
         let mut store = store();
 
@@ -749,8 +792,23 @@ mod tests {
             .expect("apply should succeed");
         assert_eq!(
             result.updated_nodes[0].rendered_content,
-            format!("alpha {{{{{}:: Topic }}}} omega", root.root.id)
+            format!("alpha  {{{{{}::Topic}}}}  omega", root.root.id)
         );
+    }
+
+    #[test]
+    fn read_root_shows_neighboring_roots() {
+        let mut store = store();
+
+        let first = create_root(&mut store, "Alpha").expect("first root should be created");
+        let current = create_root(&mut store, "Beta").expect("current root should be created");
+        let next = create_root(&mut store, "Gamma").expect("next root should be created");
+
+        let view = read_node_context(&store, current.root.id, 5500).expect("read should succeed");
+        assert_eq!(view.prev_siblings.len(), 1);
+        assert_eq!(view.prev_siblings[0].id, first.root.id);
+        assert_eq!(view.next_siblings.len(), 1);
+        assert_eq!(view.next_siblings[0].id, next.root.id);
     }
 
     #[derive(Default)]
