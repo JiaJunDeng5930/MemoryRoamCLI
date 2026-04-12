@@ -203,9 +203,16 @@ pub fn move_node<R: WriteRepository>(
             Placement::TopLevelFirst | Placement::TopLevelLast
         )
     {
-        return Err(KernelError::Constraint(String::from(
-            "root nodes must remain at the top level",
-        )));
+        let target_id = placement.target_id();
+        let target_is_root = match target_id {
+            Some(target_id) => repository.is_root_node(target_id)?,
+            None => false,
+        };
+        if !target_is_root {
+            return Err(KernelError::Constraint(String::from(
+                "root nodes must remain at the top level",
+            )));
+        }
     }
 
     repository.move_node(node_id, placement)
@@ -1142,5 +1149,23 @@ mod tests {
         let error = move_node(&mut repository, root_id, Placement::LastChildOf(parent_id))
             .expect_err("root move should fail");
         assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn move_node_allows_reordering_roots_around_other_roots() {
+        let mut repository = FakeRepository::default();
+        let first_id = NodeId::new(1).expect("valid test id");
+        let second_id = NodeId::new(2).expect("valid test id");
+        repository
+            .existing
+            .insert(first_id, stored_node(1, "First"));
+        repository
+            .existing
+            .insert(second_id, stored_node(2, "Second"));
+        repository.root_nodes.insert(first_id);
+        repository.root_nodes.insert(second_id);
+
+        move_node(&mut repository, first_id, Placement::After(second_id))
+            .expect("root reorder should succeed");
     }
 }

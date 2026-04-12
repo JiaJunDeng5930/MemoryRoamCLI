@@ -62,6 +62,23 @@ fn cli_note_and_day_show_today_entries() {
 }
 
 #[test]
+fn cli_empty_today_hint_preserves_selected_database() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let database_path = temp_dir.path().join("notes.sqlite3");
+
+    command(&temp_dir).arg("init").assert().success();
+
+    command(&temp_dir)
+        .arg("day")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "use: memoryroam --db {} note \"...\"",
+            database_path.display()
+        )));
+}
+
+#[test]
 fn cli_root_create_and_apply_rewrite_selected_nodes() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
 
