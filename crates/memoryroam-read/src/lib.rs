@@ -118,8 +118,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use memoryroam_domain::{
-        AliasText, ContentLine, IncomingLinkRecord, LookupCandidate, NodeId, ReadRepository,
-        StoredNode,
+        AliasText, ContentLine, DailyNoteRecord, IncomingLinkRecord, LookupCandidate, NodeId,
+        ReadRepository, StoredNode,
     };
 
     use super::*;
@@ -193,6 +193,47 @@ mod tests {
 
         fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
             Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(None)
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(self
+                .nodes
+                .values()
+                .filter(|node| node.parent_id.is_none())
+                .cloned()
+                .collect())
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            _content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            Ok(None)
+        }
+
+        fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+            Ok(self
+                .nodes
+                .values()
+                .filter(|node| node.content.as_str().contains(needle))
+                .cloned()
+                .collect())
         }
     }
 

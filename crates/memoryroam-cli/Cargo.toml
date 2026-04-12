@@ -11,9 +11,10 @@ name = "memoryroam"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 clap = { version = "4.5.48", features = ["derive"] }
+memoryroam-application = { path = "../memoryroam-application" }
 memoryroam-domain = { path = "../memoryroam-domain" }
-memoryroam-read = { path = "../memoryroam-read" }
 memoryroam-storage-sqlite = { path = "../memoryroam-storage-sqlite" }
 memoryroam-write = { path = "../memoryroam-write" }
 

@@ -8,9 +8,9 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use memoryroam_domain::{
-    AliasText, ContentLine, DeleteMode, IncomingLinkRecord, KernelError, KernelResult,
-    LookupCandidate, LookupKey, NewNodeRecord, NodeId, Placement, ReadRepository, StoredNode,
-    WriteRepository, canonicalize_content,
+    AliasText, ContentLine, DailyNoteRecord, DeleteMode, IncomingLinkRecord, KernelError,
+    KernelResult, LookupCandidate, LookupKey, NewNodeRecord, NodeId, NodeUpdateRecord, Placement,
+    ReadRepository, StoredNode, WriteRepository, canonicalize_content,
 };
 use rusqlite::types::Type;
 use rusqlite::{
@@ -38,12 +38,30 @@ CREATE TABLE IF NOT EXISTS nodes (
     CHECK (instr(content_lookup_key, char(10)) = 0 AND instr(content_lookup_key, char(13)) = 0),
 
     CHECK ((first_child_id IS NULL) = (last_child_id IS NULL)),
+    CHECK (parent_id IS NOT NULL OR (prev_sibling_id IS NULL AND next_sibling_id IS NULL)),
 
     CHECK (parent_id IS NULL OR parent_id <> id),
     CHECK (first_child_id IS NULL OR first_child_id <> id),
     CHECK (last_child_id IS NULL OR last_child_id <> id),
     CHECK (prev_sibling_id IS NULL OR prev_sibling_id <> id),
     CHECK (next_sibling_id IS NULL OR next_sibling_id <> id)
+);
+
+CREATE TABLE IF NOT EXISTS root_nodes (
+    node_id INTEGER PRIMARY KEY
+            REFERENCES nodes(id)
+            ON DELETE RESTRICT
+            DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE IF NOT EXISTS daily_notes (
+    note_date TEXT PRIMARY KEY,
+    node_id   INTEGER NOT NULL UNIQUE
+              REFERENCES nodes(id)
+              ON DELETE RESTRICT
+              DEFERRABLE INITIALLY DEFERRED,
+
+    CHECK (date(note_date) = note_date)
 );
 
 CREATE TABLE IF NOT EXISTS node_aliases (
@@ -81,23 +99,14 @@ CREATE TABLE IF NOT EXISTS node_links (
     CHECK (ordinal >= 1)
 );
 
-CREATE TABLE IF NOT EXISTS tree_root (
-    root_id         INTEGER PRIMARY KEY CHECK (root_id = 1),
-    first_child_id  INTEGER REFERENCES nodes(id) DEFERRABLE INITIALLY DEFERRED,
-    last_child_id   INTEGER REFERENCES nodes(id) DEFERRABLE INITIALLY DEFERRED,
-
-    CHECK ((first_child_id IS NULL) = (last_child_id IS NULL))
-);
-
-INSERT INTO tree_root(root_id, first_child_id, last_child_id)
-VALUES (1, NULL, NULL)
-ON CONFLICT(root_id) DO NOTHING;
-
 CREATE INDEX IF NOT EXISTS idx_nodes_parent_id
     ON nodes(parent_id);
 
 CREATE INDEX IF NOT EXISTS idx_nodes_content_lookup_key
     ON nodes(content_lookup_key);
+
+CREATE INDEX IF NOT EXISTS idx_daily_notes_node_id
+    ON daily_notes(node_id);
 
 CREATE INDEX IF NOT EXISTS idx_aliases_alias_key
     ON node_aliases(alias_key, node_id);
@@ -111,12 +120,14 @@ SELECT
     content_lookup_key AS lookup_key,
     'content' AS match_kind
 FROM nodes
+WHERE id NOT IN (SELECT node_id FROM daily_notes)
 UNION ALL
 SELECT
-    node_id,
+    a.node_id,
     alias_key AS lookup_key,
     'alias' AS match_kind
-FROM node_aliases;
+FROM node_aliases AS a
+WHERE a.node_id NOT IN (SELECT node_id FROM daily_notes);
 
 CREATE VIEW IF NOT EXISTS v_incoming_links AS
 SELECT
@@ -150,7 +161,100 @@ BEGIN
     );
 END;
 
-PRAGMA user_version = 1;
+CREATE TRIGGER IF NOT EXISTS root_nodes_validate_insert
+BEFORE INSERT ON root_nodes
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'root node must be a top-level node without siblings')
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM nodes
+        WHERE id = NEW.node_id
+          AND parent_id IS NULL
+          AND prev_sibling_id IS NULL
+          AND next_sibling_id IS NULL
+    );
+
+    SELECT RAISE(ABORT, 'root node cannot also be a daily note')
+    WHERE EXISTS (
+        SELECT 1
+        FROM daily_notes
+        WHERE node_id = NEW.node_id
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert
+BEFORE INSERT ON daily_notes
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'daily note node must be a top-level node without siblings')
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM nodes
+        WHERE id = NEW.node_id
+          AND parent_id IS NULL
+          AND prev_sibling_id IS NULL
+          AND next_sibling_id IS NULL
+          AND content = NEW.note_date
+    );
+
+    SELECT RAISE(ABORT, 'daily note node cannot also be a root node')
+    WHERE EXISTS (
+        SELECT 1
+        FROM root_nodes
+        WHERE node_id = NEW.node_id
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS daily_note_nodes_reject_update
+BEFORE UPDATE OF content, parent_id, prev_sibling_id, next_sibling_id ON nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM daily_notes
+    WHERE node_id = OLD.id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'daily note date nodes are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS daily_note_nodes_reject_delete
+BEFORE DELETE ON nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM daily_notes
+    WHERE node_id = OLD.id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'daily note date nodes are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS node_aliases_reject_daily_note_insert
+BEFORE INSERT ON node_aliases
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM daily_notes
+    WHERE node_id = NEW.node_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'daily note date nodes cannot have aliases');
+END;
+
+CREATE TRIGGER IF NOT EXISTS node_aliases_reject_daily_note_delete
+BEFORE DELETE ON node_aliases
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM daily_notes
+    WHERE node_id = OLD.node_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'daily note date nodes cannot have aliases');
+END;
+
+PRAGMA user_version = 2;
 "#;
 
 /// SQLite-backed repository implementation for MemoryRoam.
@@ -205,19 +309,17 @@ impl ReadRepository for SqliteStore {
 
     fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
         ensure_schema_initialized(&self.connection)?;
-        let start = match parent_id {
+        match parent_id {
             Some(parent_id) => {
                 let parent =
                     fetch_node(&self.connection, parent_id)?.ok_or(KernelError::NotFound {
                         entity: "node",
                         id: parent_id,
                     })?;
-                parent.first_child_id
+                follow_chain(&self.connection, parent.first_child_id)
             }
-            None => fetch_root(&self.connection)?.first_child_id,
-        };
-
-        follow_chain(&self.connection, start)
+            None => list_root_nodes_from_handle(&self.connection),
+        }
     }
 
     fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
@@ -356,6 +458,41 @@ impl ReadRepository for SqliteStore {
         segments.reverse();
         Ok(segments.join(" > "))
     }
+
+    fn find_daily_note(&self, note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+        ensure_schema_initialized(&self.connection)?;
+        find_daily_note_from_handle(&self.connection, note_date)
+    }
+
+    fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+        ensure_schema_initialized(&self.connection)?;
+        list_daily_notes_from_handle(&self.connection)
+    }
+
+    fn is_daily_note_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        ensure_schema_initialized(&self.connection)?;
+        is_daily_note_node_in_handle(&self.connection, node_id)
+    }
+
+    fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        ensure_schema_initialized(&self.connection)?;
+        is_root_node_in_handle(&self.connection, node_id)
+    }
+
+    fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+        ensure_schema_initialized(&self.connection)?;
+        list_root_nodes_from_handle(&self.connection)
+    }
+
+    fn find_root_node_by_content(&self, content: &ContentLine) -> KernelResult<Option<StoredNode>> {
+        ensure_schema_initialized(&self.connection)?;
+        find_root_node_by_content_from_handle(&self.connection, content)
+    }
+
+    fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+        ensure_schema_initialized(&self.connection)?;
+        search_text_matches_from_handle(&self.connection, needle)
+    }
 }
 
 impl WriteRepository for SqliteStore {
@@ -486,30 +623,37 @@ impl WriteRepository for SqliteStore {
         Ok(inserted_ids)
     }
 
-    fn update_node_content(
-        &mut self,
-        node_id: NodeId,
-        content: &ContentLine,
-        lookup_key: &LookupKey,
-        outgoing_links: &[NodeId],
-    ) -> KernelResult<()> {
+    fn update_node_contents(&mut self, updates: &[NodeUpdateRecord]) -> KernelResult<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
         let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
         ensure_schema_initialized(&transaction)?;
-        ensure_node_exists_in_db(&transaction, node_id)?;
 
-        transaction
-            .execute(
-                "UPDATE nodes
-                 SET content = ?1, content_lookup_key = ?2
-                 WHERE id = ?3",
-                params![content.as_str(), lookup_key.as_str(), node_id.value()],
-            )
-            .map_err(map_sqlite_error)?;
-        refresh_outgoing_links(&transaction, node_id, outgoing_links)?;
+        for update in updates {
+            ensure_node_exists_in_db(&transaction, update.node_id)?;
+            transaction
+                .execute(
+                    "UPDATE nodes
+                     SET content = ?1, content_lookup_key = ?2
+                     WHERE id = ?3",
+                    params![
+                        update.content.as_str(),
+                        update.lookup_key.as_str(),
+                        update.node_id.value()
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+            refresh_outgoing_links(&transaction, update.node_id, &update.outgoing_links)?;
+        }
+
         let repository = TransactionRepository {
             transaction: &transaction,
         };
-        ensure_no_link_cycle(&repository, node_id)?;
+        for update in updates {
+            ensure_no_link_cycle(&repository, update.node_id)?;
+        }
 
         transaction.commit().map_err(map_sqlite_error)
     }
@@ -537,6 +681,7 @@ impl WriteRepository for SqliteStore {
             entity: "node",
             id: node_id,
         })?;
+        let node_is_root = is_root_node_in_handle(&transaction, node_id)?;
 
         match mode {
             DeleteMode::Cascade => {
@@ -548,7 +693,20 @@ impl WriteRepository for SqliteStore {
                     )));
                 }
 
-                detach_node(&transaction, &node)?;
+                if node.parent_id.is_some() {
+                    detach_node(&transaction, &node)?;
+                } else if node_is_root {
+                    transaction
+                        .execute(
+                            "DELETE FROM root_nodes WHERE node_id = ?1",
+                            params![node_id.value()],
+                        )
+                        .map_err(map_sqlite_error)?;
+                } else {
+                    return Err(KernelError::Constraint(format!(
+                        "top-level node {node_id} cannot be deleted"
+                    )));
+                }
                 transaction
                     .execute(
                         "WITH RECURSIVE subtree(id) AS (
@@ -565,6 +723,12 @@ impl WriteRepository for SqliteStore {
                     .map_err(map_sqlite_error)?;
             }
             DeleteMode::Reparent(placement) => {
+                if node.parent_id.is_none() {
+                    return Err(KernelError::Constraint(format!(
+                        "top-level node {node_id} cannot be reparent-deleted"
+                    )));
+                }
+
                 if let Some(incoming) = find_incoming_link(&transaction, node_id)? {
                     return Err(KernelError::Constraint(format!(
                         "node {node_id} is still referenced by node {}",
@@ -635,6 +799,54 @@ impl WriteRepository for SqliteStore {
 
         transaction.commit().map_err(map_sqlite_error)
     }
+
+    fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId> {
+        let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
+        ensure_schema_initialized(&transaction)?;
+
+        let node_id = insert_top_level_node(&transaction, node)?;
+        transaction
+            .execute(
+                "INSERT INTO root_nodes (node_id) VALUES (?1)",
+                params![node_id.value()],
+            )
+            .map_err(map_sqlite_error)?;
+
+        let repository = TransactionRepository {
+            transaction: &transaction,
+        };
+        ensure_no_link_cycle(&repository, node_id)?;
+
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(node_id)
+    }
+
+    fn create_daily_note_node(&mut self, note_date: &str) -> KernelResult<NodeId> {
+        let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
+        ensure_schema_initialized(&transaction)?;
+
+        let content =
+            ContentLine::parse(note_date).map_err(|error| KernelError::Input(error.to_string()))?;
+        let lookup_key = LookupKey::from_content(&content)
+            .map_err(|error| KernelError::Input(error.to_string()))?;
+        let node = NewNodeRecord {
+            content,
+            lookup_key,
+            outgoing_links: Vec::new(),
+            aliases: Vec::new(),
+        };
+
+        let node_id = insert_top_level_node(&transaction, &node)?;
+        transaction
+            .execute(
+                "INSERT INTO daily_notes (note_date, node_id) VALUES (?1, ?2)",
+                params![note_date, node_id.value()],
+            )
+            .map_err(map_sqlite_error)?;
+
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(node_id)
+    }
 }
 
 trait SqlHandle {
@@ -662,19 +874,17 @@ impl ReadRepository for TransactionRepository<'_> {
     }
 
     fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
-        let start = match parent_id {
+        match parent_id {
             Some(parent_id) => {
                 let parent =
                     fetch_node(self.transaction, parent_id)?.ok_or(KernelError::NotFound {
                         entity: "node",
                         id: parent_id,
                     })?;
-                parent.first_child_id
+                follow_chain(self.transaction, parent.first_child_id)
             }
-            None => fetch_root(self.transaction)?.first_child_id,
-        };
-
-        follow_chain(self.transaction, start)
+            None => list_root_nodes_from_handle(self.transaction),
+        }
     }
 
     fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
@@ -806,6 +1016,34 @@ impl ReadRepository for TransactionRepository<'_> {
         segments.reverse();
         Ok(segments.join(" > "))
     }
+
+    fn find_daily_note(&self, note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+        find_daily_note_from_handle(self.transaction, note_date)
+    }
+
+    fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+        list_daily_notes_from_handle(self.transaction)
+    }
+
+    fn is_daily_note_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        is_daily_note_node_in_handle(self.transaction, node_id)
+    }
+
+    fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        is_root_node_in_handle(self.transaction, node_id)
+    }
+
+    fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+        list_root_nodes_from_handle(self.transaction)
+    }
+
+    fn find_root_node_by_content(&self, content: &ContentLine) -> KernelResult<Option<StoredNode>> {
+        find_root_node_by_content_from_handle(self.transaction, content)
+    }
+
+    fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+        search_text_matches_from_handle(self.transaction, needle)
+    }
 }
 
 impl ReadRepository for BatchCreateRepository<'_> {
@@ -814,19 +1052,17 @@ impl ReadRepository for BatchCreateRepository<'_> {
     }
 
     fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
-        let start = match parent_id {
+        match parent_id {
             Some(parent_id) => {
                 let parent =
                     fetch_node(self.transaction, parent_id)?.ok_or(KernelError::NotFound {
                         entity: "node",
                         id: parent_id,
                     })?;
-                parent.first_child_id
+                follow_chain(self.transaction, parent.first_child_id)
             }
-            None => fetch_root(self.transaction)?.first_child_id,
-        };
-
-        follow_chain(self.transaction, start)
+            None => list_root_nodes_from_handle(self.transaction),
+        }
     }
 
     fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
@@ -885,6 +1121,55 @@ impl ReadRepository for BatchCreateRepository<'_> {
         }
         .node_path(node_id)
     }
+
+    fn find_daily_note(&self, note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .find_daily_note(note_date)
+    }
+
+    fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .list_daily_notes()
+    }
+
+    fn is_daily_note_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .is_daily_note_node(node_id)
+    }
+
+    fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .is_root_node(node_id)
+    }
+
+    fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .list_root_nodes()
+    }
+
+    fn find_root_node_by_content(&self, content: &ContentLine) -> KernelResult<Option<StoredNode>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .find_root_node_by_content(content)
+    }
+
+    fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+        TransactionRepository {
+            transaction: self.transaction,
+        }
+        .search_text_matches(needle)
+    }
 }
 
 impl SqlHandle for Connection {
@@ -931,17 +1216,11 @@ impl SqlHandle for Transaction<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RootRecord {
-    first_child_id: Option<NodeId>,
-    last_child_id: Option<NodeId>,
-}
-
 fn ensure_schema_initialized(handle: &impl SqlHandle) -> KernelResult<()> {
     let version = handle
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map_err(map_sqlite_error)?;
-    if version != 1 {
+    if version != 2 {
         return Err(KernelError::Storage(format!(
             "unsupported schema version {version}; run `memoryroam init`"
         )));
@@ -1018,21 +1297,161 @@ fn fetch_node(handle: &impl SqlHandle, node_id: NodeId) -> KernelResult<Option<S
         .map_err(map_sqlite_error)
 }
 
-fn fetch_root(handle: &impl SqlHandle) -> KernelResult<RootRecord> {
+fn find_daily_note_from_handle(
+    handle: &impl SqlHandle,
+    note_date: &str,
+) -> KernelResult<Option<DailyNoteRecord>> {
     handle
         .query_row(
-            "SELECT first_child_id, last_child_id
-             FROM tree_root
-             WHERE root_id = 1",
-            [],
+            "SELECT note_date, node_id
+             FROM daily_notes
+             WHERE note_date = ?1",
+            params![note_date],
             |row| {
-                Ok(RootRecord {
-                    first_child_id: optional_node_id_from_row(row, 0)?,
-                    last_child_id: optional_node_id_from_row(row, 1)?,
+                Ok(DailyNoteRecord {
+                    note_date: row.get::<_, String>(0)?,
+                    node_id: node_id_from_row(row, 1)?,
                 })
             },
         )
+        .optional()
         .map_err(map_sqlite_error)
+}
+
+fn list_daily_notes_from_handle(handle: &impl SqlHandle) -> KernelResult<Vec<DailyNoteRecord>> {
+    let mut statement = handle
+        .prepare(
+            "SELECT note_date, node_id
+             FROM daily_notes
+             ORDER BY note_date",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(DailyNoteRecord {
+                note_date: row.get::<_, String>(0)?,
+                node_id: node_id_from_row(row, 1)?,
+            })
+        })
+        .map_err(map_sqlite_error)?;
+
+    let mut daily_notes = Vec::new();
+    for row in rows {
+        daily_notes.push(row.map_err(map_sqlite_error)?);
+    }
+    Ok(daily_notes)
+}
+
+fn is_daily_note_node_in_handle(handle: &impl SqlHandle, node_id: NodeId) -> KernelResult<bool> {
+    handle
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM daily_notes
+                 WHERE node_id = ?1
+             )",
+            params![node_id.value()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists == 1)
+        .map_err(map_sqlite_error)
+}
+
+fn is_root_node_in_handle(handle: &impl SqlHandle, node_id: NodeId) -> KernelResult<bool> {
+    handle
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM root_nodes
+                 WHERE node_id = ?1
+             )",
+            params![node_id.value()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists == 1)
+        .map_err(map_sqlite_error)
+}
+
+fn list_root_nodes_from_handle(handle: &impl SqlHandle) -> KernelResult<Vec<StoredNode>> {
+    let mut statement = handle
+        .prepare(
+            "SELECT node_id
+             FROM root_nodes
+             ORDER BY node_id",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| node_id_from_row(row, 0))
+        .map_err(map_sqlite_error)?;
+
+    let mut nodes = Vec::new();
+    for row in rows {
+        let node_id = row.map_err(map_sqlite_error)?;
+        let node = fetch_node(handle, node_id)?.ok_or(KernelError::StorageCorruption(format!(
+            "missing root node {node_id}"
+        )))?;
+        nodes.push(node);
+    }
+    Ok(nodes)
+}
+
+fn find_root_node_by_content_from_handle(
+    handle: &impl SqlHandle,
+    content: &ContentLine,
+) -> KernelResult<Option<StoredNode>> {
+    handle
+        .query_row(
+            "SELECT n.id
+             FROM root_nodes AS r
+             JOIN nodes AS n
+               ON n.id = r.node_id
+             WHERE n.content = ?1
+             ORDER BY n.id
+             LIMIT 1",
+            params![content.as_str()],
+            |row| node_id_from_row(row, 0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(|node_id| {
+            fetch_node(handle, node_id)?.ok_or(KernelError::StorageCorruption(format!(
+                "missing root node {node_id}"
+            )))
+        })
+        .transpose()
+}
+
+fn search_text_matches_from_handle(
+    handle: &impl SqlHandle,
+    needle: &str,
+) -> KernelResult<Vec<StoredNode>> {
+    let mut statement = handle
+        .prepare(
+            "SELECT n.id
+             FROM nodes AS n
+             LEFT JOIN root_nodes AS r
+               ON r.node_id = n.id
+             LEFT JOIN daily_notes AS d
+               ON d.node_id = n.id
+             WHERE r.node_id IS NULL
+               AND d.node_id IS NULL
+               AND instr(n.content, ?1) > 0
+             ORDER BY n.id",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map(params![needle], |row| node_id_from_row(row, 0))
+        .map_err(map_sqlite_error)?;
+
+    let mut nodes = Vec::new();
+    for row in rows {
+        let node_id = row.map_err(map_sqlite_error)?;
+        let node = fetch_node(handle, node_id)?.ok_or(KernelError::StorageCorruption(format!(
+            "missing search match node {node_id}"
+        )))?;
+        nodes.push(node);
+    }
+    Ok(nodes)
 }
 
 fn list_outgoing_links_from_handle(
@@ -1082,6 +1501,31 @@ fn insert_single_node(
     insert_aliases(transaction, node_id, &node.aliases)?;
     refresh_outgoing_links(transaction, node_id, &node.outgoing_links)?;
     attach_chain(transaction, node_id, node_id, placement)?;
+    Ok(node_id)
+}
+
+fn insert_top_level_node(
+    transaction: &Transaction<'_>,
+    node: &NewNodeRecord,
+) -> KernelResult<NodeId> {
+    transaction
+        .execute(
+            "INSERT INTO nodes (
+                content,
+                content_lookup_key,
+                parent_id,
+                first_child_id,
+                last_child_id,
+                prev_sibling_id,
+                next_sibling_id
+             ) VALUES (?1, ?2, NULL, NULL, NULL, NULL, NULL)",
+            params![node.content.as_str(), node.lookup_key.as_str()],
+        )
+        .map_err(map_sqlite_error)?;
+    let node_id = NodeId::try_from(transaction.last_insert_rowid())
+        .map_err(|error| KernelError::Storage(error.to_string()))?;
+    insert_aliases(transaction, node_id, &node.aliases)?;
+    refresh_outgoing_links(transaction, node_id, &node.outgoing_links)?;
     Ok(node_id)
 }
 
@@ -1213,6 +1657,15 @@ fn validate_placement_target(
     placement: Placement,
     moving_node_id: Option<NodeId>,
 ) -> KernelResult<()> {
+    if matches!(
+        placement,
+        Placement::TopLevelFirst | Placement::TopLevelLast
+    ) {
+        return Err(KernelError::Input(String::from(
+            "top-level placement is not supported",
+        )));
+    }
+
     if let Some(target_id) = placement.target_id() {
         ensure_node_exists_in_db(handle, target_id)?;
         if Some(target_id) == moving_node_id {
@@ -1257,21 +1710,17 @@ fn is_in_subtree(
 }
 
 fn detach_node(transaction: &Transaction<'_>, node: &StoredNode) -> KernelResult<()> {
-    let (current_first, current_last) = match node.parent_id {
-        Some(parent_id) => {
-            let parent = fetch_node(transaction, parent_id)?.ok_or(
-                KernelError::StorageCorruption(format!(
-                    "missing parent node {parent_id} while detaching {}",
-                    node.id
-                )),
-            )?;
-            (parent.first_child_id, parent.last_child_id)
-        }
-        None => {
-            let root = fetch_root(transaction)?;
-            (root.first_child_id, root.last_child_id)
-        }
-    };
+    let parent_id = node.parent_id.ok_or(KernelError::Constraint(format!(
+        "top-level node {} cannot be detached",
+        node.id
+    )))?;
+    let parent =
+        fetch_node(transaction, parent_id)?.ok_or(KernelError::StorageCorruption(format!(
+            "missing parent node {parent_id} while detaching {}",
+            node.id
+        )))?;
+    let current_first = parent.first_child_id;
+    let current_last = parent.last_child_id;
 
     let new_first = if node.prev_sibling_id.is_none() {
         node.next_sibling_id
@@ -1311,7 +1760,7 @@ fn detach_node(transaction: &Transaction<'_>, node: &StoredNode) -> KernelResult
             .map_err(map_sqlite_error)?;
     }
 
-    set_container_bounds(transaction, node.parent_id, new_first, new_last)?;
+    set_container_bounds(transaction, Some(parent_id), new_first, new_last)?;
 
     transaction
         .execute(
@@ -1332,100 +1781,20 @@ fn attach_chain(
     placement: Placement,
 ) -> KernelResult<()> {
     match placement {
-        Placement::TopLevelFirst => {
-            let root = fetch_root(transaction)?;
-            update_chain_parent(transaction, first_id, last_id, None)?;
-            transaction
-                .execute(
-                    "UPDATE nodes
-                     SET prev_sibling_id = NULL
-                     WHERE id = ?1",
-                    params![first_id.value()],
-                )
-                .map_err(map_sqlite_error)?;
-            transaction
-                .execute(
-                    "UPDATE nodes
-                     SET next_sibling_id = ?1
-                     WHERE id = ?2",
-                    params![root.first_child_id.map(NodeId::value), last_id.value()],
-                )
-                .map_err(map_sqlite_error)?;
-            if let Some(old_first_id) = root.first_child_id {
-                transaction
-                    .execute(
-                        "UPDATE nodes
-                         SET prev_sibling_id = ?1
-                         WHERE id = ?2",
-                        params![last_id.value(), old_first_id.value()],
-                    )
-                    .map_err(map_sqlite_error)?;
-                transaction
-                    .execute(
-                        "UPDATE nodes
-                         SET next_sibling_id = ?1
-                         WHERE id = ?2",
-                        params![old_first_id.value(), last_id.value()],
-                    )
-                    .map_err(map_sqlite_error)?;
-            }
-            set_container_bounds(
-                transaction,
-                None,
-                Some(first_id),
-                root.last_child_id.or(Some(last_id)),
-            )?;
-        }
-        Placement::TopLevelLast => {
-            let root = fetch_root(transaction)?;
-            update_chain_parent(transaction, first_id, last_id, None)?;
-            transaction
-                .execute(
-                    "UPDATE nodes
-                     SET next_sibling_id = NULL
-                     WHERE id = ?1",
-                    params![last_id.value()],
-                )
-                .map_err(map_sqlite_error)?;
-            transaction
-                .execute(
-                    "UPDATE nodes
-                     SET prev_sibling_id = ?1
-                     WHERE id = ?2",
-                    params![root.last_child_id.map(NodeId::value), first_id.value()],
-                )
-                .map_err(map_sqlite_error)?;
-            if let Some(old_last_id) = root.last_child_id {
-                transaction
-                    .execute(
-                        "UPDATE nodes
-                         SET next_sibling_id = ?1
-                         WHERE id = ?2",
-                        params![first_id.value(), old_last_id.value()],
-                    )
-                    .map_err(map_sqlite_error)?;
-                transaction
-                    .execute(
-                        "UPDATE nodes
-                         SET prev_sibling_id = ?1
-                         WHERE id = ?2",
-                        params![old_last_id.value(), first_id.value()],
-                    )
-                    .map_err(map_sqlite_error)?;
-            }
-            set_container_bounds(
-                transaction,
-                None,
-                root.first_child_id.or(Some(first_id)),
-                Some(last_id),
-            )?;
+        Placement::TopLevelFirst | Placement::TopLevelLast => {
+            return Err(KernelError::Input(String::from(
+                "top-level placement is not supported",
+            )));
         }
         Placement::Before(target_id) => {
             let target = fetch_node(transaction, target_id)?.ok_or(KernelError::NotFound {
                 entity: "node",
                 id: target_id,
             })?;
-            update_chain_parent(transaction, first_id, last_id, target.parent_id)?;
+            let target_parent_id = target.parent_id.ok_or(KernelError::Constraint(format!(
+                "top-level node {target_id} cannot participate in sibling placement"
+            )))?;
+            update_chain_parent(transaction, first_id, last_id, Some(target_parent_id))?;
             transaction
                 .execute(
                     "UPDATE nodes
@@ -1452,17 +1821,17 @@ fn attach_chain(
                     )
                     .map_err(map_sqlite_error)?;
             } else {
-                let current_last = match target.parent_id {
-                    Some(parent_id) => {
-                        fetch_node(transaction, parent_id)?
-                            .ok_or(KernelError::StorageCorruption(format!(
-                                "missing parent node {parent_id}"
-                            )))?
-                            .last_child_id
-                    }
-                    None => fetch_root(transaction)?.last_child_id,
-                };
-                set_container_bounds(transaction, target.parent_id, Some(first_id), current_last)?;
+                let current_last = fetch_node(transaction, target_parent_id)?
+                    .ok_or(KernelError::StorageCorruption(format!(
+                        "missing parent node {target_parent_id}"
+                    )))?
+                    .last_child_id;
+                set_container_bounds(
+                    transaction,
+                    Some(target_parent_id),
+                    Some(first_id),
+                    current_last,
+                )?;
             }
             transaction
                 .execute(
@@ -1478,7 +1847,10 @@ fn attach_chain(
                 entity: "node",
                 id: target_id,
             })?;
-            update_chain_parent(transaction, first_id, last_id, target.parent_id)?;
+            let target_parent_id = target.parent_id.ok_or(KernelError::Constraint(format!(
+                "top-level node {target_id} cannot participate in sibling placement"
+            )))?;
+            update_chain_parent(transaction, first_id, last_id, Some(target_parent_id))?;
             transaction
                 .execute(
                     "UPDATE nodes
@@ -1505,17 +1877,17 @@ fn attach_chain(
                     )
                     .map_err(map_sqlite_error)?;
             } else {
-                let current_first = match target.parent_id {
-                    Some(parent_id) => {
-                        fetch_node(transaction, parent_id)?
-                            .ok_or(KernelError::StorageCorruption(format!(
-                                "missing parent node {parent_id}"
-                            )))?
-                            .first_child_id
-                    }
-                    None => fetch_root(transaction)?.first_child_id,
-                };
-                set_container_bounds(transaction, target.parent_id, current_first, Some(last_id))?;
+                let current_first = fetch_node(transaction, target_parent_id)?
+                    .ok_or(KernelError::StorageCorruption(format!(
+                        "missing parent node {target_parent_id}"
+                    )))?
+                    .first_child_id;
+                set_container_bounds(
+                    transaction,
+                    Some(target_parent_id),
+                    current_first,
+                    Some(last_id),
+                )?;
             }
             transaction
                 .execute(
@@ -1659,37 +2031,22 @@ fn set_container_bounds(
     first_child_id: Option<NodeId>,
     last_child_id: Option<NodeId>,
 ) -> KernelResult<()> {
-    match parent_id {
-        Some(parent_id) => {
-            transaction
-                .execute(
-                    "UPDATE nodes
-                     SET first_child_id = ?1,
-                         last_child_id = ?2
-                     WHERE id = ?3",
-                    params![
-                        first_child_id.map(NodeId::value),
-                        last_child_id.map(NodeId::value),
-                        parent_id.value()
-                    ],
-                )
-                .map_err(map_sqlite_error)?;
-        }
-        None => {
-            transaction
-                .execute(
-                    "UPDATE tree_root
-                     SET first_child_id = ?1,
-                         last_child_id = ?2
-                     WHERE root_id = 1",
-                    params![
-                        first_child_id.map(NodeId::value),
-                        last_child_id.map(NodeId::value)
-                    ],
-                )
-                .map_err(map_sqlite_error)?;
-        }
-    }
+    let parent_id = parent_id.ok_or(KernelError::Constraint(String::from(
+        "top-level nodes do not own child-chain bounds",
+    )))?;
+    transaction
+        .execute(
+            "UPDATE nodes
+             SET first_child_id = ?1,
+                 last_child_id = ?2
+             WHERE id = ?3",
+            params![
+                first_child_id.map(NodeId::value),
+                last_child_id.map(NodeId::value),
+                parent_id.value()
+            ],
+        )
+        .map_err(map_sqlite_error)?;
     Ok(())
 }
 
@@ -1759,8 +2116,11 @@ fn find_external_subtree_reference(
 mod tests {
     use tempfile::NamedTempFile;
 
-    use memoryroam_domain::{DeleteMode, Placement};
-    use memoryroam_read::{list_top_level, read_node};
+    use memoryroam_domain::{
+        ContentLine, DeleteMode, NewNodeRecord, Placement, ReadRepository, WriteRepository,
+        canonicalize_content,
+    };
+    use memoryroam_read::read_node;
     use memoryroam_write::{add_aliases, create_nodes, delete_node, init, move_node, update_node};
 
     use super::*;
@@ -1774,101 +2134,135 @@ mod tests {
         SqliteStore::open_or_create(path).expect("store should open")
     }
 
-    #[test]
-    fn init_schema_creates_tree_root() {
-        let mut store = store();
-
-        init(&mut store).expect("schema init should succeed");
-        let root = fetch_root(&store.connection).expect("root row should exist");
-
-        assert_eq!(root.first_child_id, None);
-        assert_eq!(root.last_child_id, None);
+    fn node_record(repository: &impl ReadRepository, raw_content: &str) -> NewNodeRecord {
+        let content = ContentLine::parse(raw_content).expect("content should parse");
+        let canonical =
+            canonicalize_content(repository, &content).expect("content should canonicalize");
+        NewNodeRecord {
+            content: canonical.content,
+            lookup_key: canonical.lookup_key,
+            outgoing_links: canonical.outgoing_links,
+            aliases: Vec::new(),
+        }
     }
 
     #[test]
-    fn create_and_read_round_trip_with_lookup_canonicalization() {
+    fn init_schema_starts_with_empty_root_and_daily_note_sets() {
+        let mut store = store();
+
+        init(&mut store).expect("schema init should succeed");
+        assert!(
+            store
+                .list_root_nodes()
+                .expect("root list should load")
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_daily_notes()
+                .expect("daily notes should load")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn root_nodes_participate_in_lookup_resolution() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "Topic", &[], Placement::TopLevelLast)
-            .expect("first create should succeed");
-        add_aliases(
+        let root_id = store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root node should be created");
+        add_aliases(&mut store, root_id, &[String::from("topic")])
+            .expect("alias add should succeed");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        create_nodes(
             &mut store,
-            NodeId::new(1).expect("valid id"),
-            &[String::from("topic")],
+            "See {{topic}}",
+            &[],
+            Placement::LastChildOf(day_node_id),
         )
-        .expect("alias add should succeed");
-        create_nodes(&mut store, "See {{topic}}", &[], Placement::TopLevelLast)
-            .expect("lookup create should succeed");
+        .expect("lookup create should succeed");
 
-        let view =
-            read_node(&store, NodeId::new(2).expect("valid id")).expect("read should succeed");
+        let child_id = NodeId::new(day_node_id.value() + 1).expect("valid id");
+        let view = read_node(&store, child_id).expect("read should succeed");
 
-        assert_eq!(view.node.rendered_content, "See {{1::topic}}");
-        let incoming =
-            read_node(&store, NodeId::new(1).expect("valid id")).expect("read should succeed");
+        assert_eq!(
+            view.node.rendered_content,
+            format!("See {{{{{root_id}::topic}}}}")
+        );
+        let incoming = read_node(&store, root_id).expect("read should succeed");
         assert_eq!(incoming.incoming_links.len(), 1);
     }
 
     #[test]
-    fn batch_create_prefers_earlier_lines_over_existing_duplicates() {
+    fn daily_note_nodes_are_immutable() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "Topic", &[], Placement::TopLevelLast)
-            .expect("existing topic should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
 
-        create_nodes(
-            &mut store,
-            "Topic\nSee {{Topic}}",
-            &[],
-            Placement::TopLevelLast,
-        )
-        .expect("batch create should prefer the earlier line in the same batch");
+        let update_error =
+            update_node(&mut store, day_node_id, "2026-04-12").expect_err("update should fail");
+        assert!(matches!(update_error, KernelError::Constraint(_)));
 
-        let view =
-            read_node(&store, NodeId::new(3).expect("valid id")).expect("read should succeed");
+        let alias_error = add_aliases(&mut store, day_node_id, &[String::from("today")])
+            .expect_err("alias add should fail");
+        assert!(matches!(alias_error, KernelError::Constraint(_)));
 
-        assert_eq!(view.node.rendered_content, "See {{2::Topic}}");
+        let delete_error = delete_node(&mut store, day_node_id, DeleteMode::Cascade)
+            .expect_err("delete should fail");
+        assert!(matches!(delete_error, KernelError::Constraint(_)));
     }
 
     #[test]
-    fn move_preserves_top_level_order() {
+    fn move_preserves_child_order_within_a_parent() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "A\nB\nC", &[], Placement::TopLevelLast)
-            .expect("create should succeed");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        create_nodes(&mut store, "A", &[], Placement::LastChildOf(day_node_id)).expect("create A");
+        create_nodes(&mut store, "B", &[], Placement::LastChildOf(day_node_id)).expect("create B");
+        create_nodes(&mut store, "C", &[], Placement::LastChildOf(day_node_id)).expect("create C");
 
         move_node(
             &mut store,
-            NodeId::new(3).expect("valid id"),
-            Placement::Before(NodeId::new(1).expect("valid id")),
+            NodeId::new(day_node_id.value() + 2).expect("valid id"),
+            Placement::After(NodeId::new(day_node_id.value() + 3).expect("valid id")),
         )
         .expect("move should succeed");
 
-        let entries = list_top_level(&store).expect("list should succeed");
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.rendered_content.clone())
-                .collect::<Vec<_>>(),
-            vec![String::from("C"), String::from("A"), String::from("B")]
-        );
+        let entries = store
+            .list_children(Some(day_node_id))
+            .expect("children should list");
+        assert_eq!(entries[0].content.as_str(), "A");
+        assert_eq!(entries[1].content.as_str(), "C");
+        assert_eq!(entries[2].content.as_str(), "B");
     }
 
     #[test]
     fn delete_rejects_referenced_node() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "Topic", &[], Placement::TopLevelLast)
-            .expect("first create should succeed");
-        create_nodes(&mut store, "Ref {{1}}", &[], Placement::TopLevelLast)
-            .expect("create should succeed");
-
-        let error = delete_node(
+        let root_id = store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root node should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        create_nodes(
             &mut store,
-            NodeId::new(1).expect("valid id"),
-            DeleteMode::Cascade,
+            &format!("Ref {{{{{root_id}}}}}"),
+            &[],
+            Placement::LastChildOf(day_node_id),
         )
-        .expect_err("delete should fail when incoming links exist");
+        .expect("create should succeed");
+
+        let error = delete_node(&mut store, root_id, DeleteMode::Cascade)
+            .expect_err("delete should fail when incoming links exist");
 
         assert!(matches!(error, KernelError::Constraint(_)));
     }
@@ -1877,26 +2271,24 @@ mod tests {
     fn cascade_delete_allows_internal_subtree_references() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "Root", &[], Placement::TopLevelLast)
+        let root_id = store
+            .create_root_node(&node_record(&store, "Root"))
             .expect("root create should succeed");
         create_nodes(
             &mut store,
             "Child {{1}}",
             &[],
-            Placement::LastChildOf(NodeId::new(1).expect("valid id")),
+            Placement::LastChildOf(root_id),
         )
         .expect("child create should succeed");
 
-        delete_node(
-            &mut store,
-            NodeId::new(1).expect("valid id"),
-            DeleteMode::Cascade,
-        )
-        .expect("cascade delete should ignore internal subtree references");
+        delete_node(&mut store, root_id, DeleteMode::Cascade)
+            .expect("cascade delete should ignore internal subtree references");
 
         assert!(
-            list_top_level(&store)
-                .expect("list should succeed")
+            store
+                .list_root_nodes()
+                .expect("root list should load")
                 .is_empty()
         );
     }
@@ -1905,45 +2297,47 @@ mod tests {
     fn update_refreshes_outgoing_links() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "Target\nSource", &[], Placement::TopLevelLast)
-            .expect("create should succeed");
-
-        update_node(
+        let root_id = store
+            .create_root_node(&node_record(&store, "Target"))
+            .expect("root node should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        create_nodes(
             &mut store,
-            NodeId::new(2).expect("valid id"),
-            "Source {{1}}",
+            "Source",
+            &[],
+            Placement::LastChildOf(day_node_id),
         )
-        .expect("update should succeed");
+        .expect("create should succeed");
+        let source_id = NodeId::new(day_node_id.value() + 1).expect("valid id");
+
+        update_node(&mut store, source_id, &format!("Source {{{{{root_id}}}}}"))
+            .expect("update should succeed");
 
         let incoming = store
-            .list_incoming_links(NodeId::new(1).expect("valid id"))
+            .list_incoming_links(root_id)
             .expect("incoming links should load");
         assert_eq!(incoming.len(), 1);
-        assert_eq!(
-            incoming[0].source_node_id,
-            NodeId::new(2).expect("valid id")
-        );
+        assert_eq!(incoming[0].source_node_id, source_id);
     }
 
     #[test]
     fn alias_remove_uses_trimmed_lookup_key() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "Topic", &[], Placement::TopLevelLast)
+        let root_id = store
+            .create_root_node(&node_record(&store, "Topic"))
             .expect("create should succeed");
-        add_aliases(
-            &mut store,
-            NodeId::new(1).expect("valid id"),
-            &[String::from(" topic ")],
-        )
-        .expect("alias add should succeed");
+        add_aliases(&mut store, root_id, &[String::from(" topic ")])
+            .expect("alias add should succeed");
 
-        memoryroam_write::remove_alias(&mut store, NodeId::new(1).expect("valid id"), "topic")
+        memoryroam_write::remove_alias(&mut store, root_id, "topic")
             .expect("trimmed alias removal should succeed");
 
         assert!(
             store
-                .list_aliases(NodeId::new(1).expect("valid id"))
+                .list_aliases(root_id)
                 .expect("aliases should load")
                 .is_empty()
         );
@@ -1953,16 +2347,24 @@ mod tests {
     fn node_path_uses_rendered_content() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        create_nodes(&mut store, "Leaf", &[], Placement::TopLevelLast)
+        let parent_id = store
+            .create_daily_note_node("2026-04-11")
             .expect("first create should succeed");
         create_nodes(&mut store, "Parent {{1}}", &[], Placement::TopLevelLast)
-            .expect("second create should succeed");
+            .expect_err("top-level placement should be rejected");
+        create_nodes(
+            &mut store,
+            "Child {{1}}",
+            &[],
+            Placement::LastChildOf(parent_id),
+        )
+        .expect("child create should succeed");
 
         assert_eq!(
             store
-                .node_path(NodeId::new(2).expect("valid id"))
+                .node_path(NodeId::new(parent_id.value() + 1).expect("valid id"))
                 .expect("path should load"),
-            "Parent {{1::>Leaf}}"
+            "2026-04-11 > Child {{1::>2026-04-11}}"
         );
     }
 }

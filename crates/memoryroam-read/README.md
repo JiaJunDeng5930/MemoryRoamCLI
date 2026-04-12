@@ -15,8 +15,8 @@ This crate owns the rendered read workflows that the CLI exposes:
 
 ```rust,no_run
 use memoryroam_domain::{
-    AliasText, ContentLine, IncomingLinkRecord, KernelResult, LookupCandidate, NodeId,
-    ReadRepository, StoredNode,
+    AliasText, ContentLine, DailyNoteRecord, IncomingLinkRecord, KernelResult, LookupCandidate,
+    NodeId, ReadRepository, StoredNode,
 };
 use memoryroam_read::read_node;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +32,13 @@ impl ReadRepository for Repo {
     fn fetch_node_contents(&self, _node_ids: &BTreeSet<NodeId>) -> KernelResult<BTreeMap<NodeId, ContentLine>> { todo!() }
     fn lookup_candidates(&self, _key: &memoryroam_domain::LookupKey) -> KernelResult<Vec<LookupCandidate>> { todo!() }
     fn node_path(&self, _node_id: NodeId) -> KernelResult<String> { todo!() }
+    fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> { todo!() }
+    fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> { todo!() }
+    fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> { todo!() }
+    fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> { todo!() }
+    fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> { todo!() }
+    fn find_root_node_by_content(&self, _content: &ContentLine) -> KernelResult<Option<StoredNode>> { todo!() }
+    fn search_text_matches(&self, _needle: &str) -> KernelResult<Vec<StoredNode>> { todo!() }
 }
 
 let repo = Repo;

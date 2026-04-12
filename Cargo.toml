@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/memoryroam-application",
     "crates/memoryroam-cli",
     "crates/memoryroam-domain",
     "crates/memoryroam-read",

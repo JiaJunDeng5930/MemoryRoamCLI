@@ -237,6 +237,13 @@ pub struct LookupCandidate {
     pub path: String,
 }
 
+/// One daily note entry keyed by ISO date text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyNoteRecord {
+    pub note_date: String,
+    pub node_id: NodeId,
+}
+
 /// One incoming-link occurrence returned by storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncomingLinkRecord {
@@ -287,6 +294,15 @@ pub struct NewNodeRecord {
     pub lookup_key: LookupKey,
     pub outgoing_links: Vec<NodeId>,
     pub aliases: Vec<AliasText>,
+}
+
+/// One canonicalized node update payload ready for storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeUpdateRecord {
+    pub node_id: NodeId,
+    pub content: ContentLine,
+    pub lookup_key: LookupKey,
+    pub outgoing_links: Vec<NodeId>,
 }
 
 /// Placement target used by create, move, and delete-reparent operations.
@@ -367,6 +383,20 @@ pub trait ReadRepository {
     fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>>;
     /// Returns the rendered breadcrumb path for one node.
     fn node_path(&self, node_id: NodeId) -> KernelResult<String>;
+    /// Returns the daily note node for one ISO date, if present.
+    fn find_daily_note(&self, note_date: &str) -> KernelResult<Option<DailyNoteRecord>>;
+    /// Lists all daily note records in ascending date order.
+    fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>>;
+    /// Returns whether the given node is a daily note date node.
+    fn is_daily_note_node(&self, node_id: NodeId) -> KernelResult<bool>;
+    /// Returns whether the given node is a root top-level node.
+    fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool>;
+    /// Lists all root top-level nodes in stable order.
+    fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>>;
+    /// Finds one root node whose content exactly matches the input content.
+    fn find_root_node_by_content(&self, content: &ContentLine) -> KernelResult<Option<StoredNode>>;
+    /// Returns non-root, non-daily nodes whose raw content contains the substring.
+    fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>>;
 
     /// Returns whether the given node currently exists.
     fn node_exists(&self, node_id: NodeId) -> KernelResult<bool> {
@@ -392,13 +422,7 @@ pub trait WriteRepository: ReadRepository {
         nodes: &[NewNodeRecord],
     ) -> KernelResult<Vec<NodeId>>;
     /// Replaces one node's canonical content and outgoing links.
-    fn update_node_content(
-        &mut self,
-        node_id: NodeId,
-        content: &ContentLine,
-        lookup_key: &LookupKey,
-        outgoing_links: &[NodeId],
-    ) -> KernelResult<()>;
+    fn update_node_contents(&mut self, updates: &[NodeUpdateRecord]) -> KernelResult<()>;
     /// Moves one existing node or subtree to a new placement.
     fn move_node(&mut self, node_id: NodeId, placement: Placement) -> KernelResult<()>;
     /// Deletes one node using the requested mode.
@@ -407,6 +431,10 @@ pub trait WriteRepository: ReadRepository {
     fn add_aliases(&mut self, node_id: NodeId, aliases: &[AliasText]) -> KernelResult<()>;
     /// Removes one alias from one node.
     fn remove_alias(&mut self, node_id: NodeId, alias: &AliasText) -> KernelResult<()>;
+    /// Creates one root top-level node.
+    fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId>;
+    /// Creates one daily note date node for the provided ISO date.
+    fn create_daily_note_node(&mut self, note_date: &str) -> KernelResult<NodeId>;
 }
 
 /// Parses a validated content line into plain-text and link fragments.
@@ -767,6 +795,37 @@ mod tests {
 
         fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
             Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(None)
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            _content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            Ok(None)
+        }
+
+        fn search_text_matches(&self, _needle: &str) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
         }
     }
 
