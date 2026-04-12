@@ -457,22 +457,28 @@ fn choose_siblings<R: ReadRepository>(
     let mut chosen_prev = Vec::new();
     let mut chosen_next = Vec::new();
     let max_len = prev_candidates.len().max(next_candidates.len());
+    let mut stop_prev = false;
+    let mut stop_next = false;
 
     for index in 0..max_len {
-        if let Some(node) = prev_candidates.get(index) {
+        if !stop_prev && let Some(node) = prev_candidates.get(index) {
             let line = render_node_line(repository, node)?;
             let line_tokens = estimate_tokens(line.rendered_content.as_str()) + 8;
             if used_tokens + line_tokens <= soft_limit {
                 used_tokens += line_tokens;
                 chosen_prev.push(line);
+            } else {
+                stop_prev = true;
             }
         }
-        if let Some(node) = next_candidates.get(index) {
+        if !stop_next && let Some(node) = next_candidates.get(index) {
             let line = render_node_line(repository, node)?;
             let line_tokens = estimate_tokens(line.rendered_content.as_str()) + 8;
             if used_tokens + line_tokens <= soft_limit {
                 used_tokens += line_tokens;
                 chosen_next.push(line);
+            } else {
+                stop_next = true;
             }
         }
     }
@@ -764,6 +770,59 @@ mod tests {
         assert_eq!(view.prev_siblings[0].id, first.root.id);
         assert_eq!(view.next_siblings.len(), 1);
         assert_eq!(view.next_siblings[0].id, next.root.id);
+    }
+
+    #[test]
+    fn read_context_does_not_skip_hidden_nearest_siblings() {
+        let near_id = NodeId::new(1).expect("valid test id");
+        let far_id = NodeId::new(2).expect("valid test id");
+        let current_id = NodeId::new(3).expect("valid test id");
+        let repository = MalformedSearchRepository {
+            nodes: BTreeMap::from([
+                (
+                    near_id,
+                    StoredNode {
+                        id: near_id,
+                        content: ContentLine::parse("X".repeat(2000))
+                            .expect("content should parse"),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: Some(far_id),
+                        next_sibling_id: None,
+                    },
+                ),
+                (
+                    far_id,
+                    StoredNode {
+                        id: far_id,
+                        content: ContentLine::parse("Short").expect("content should parse"),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: None,
+                        next_sibling_id: Some(near_id),
+                    },
+                ),
+                (
+                    current_id,
+                    StoredNode {
+                        id: current_id,
+                        content: ContentLine::parse("Current").expect("content should parse"),
+                        parent_id: Some(NodeId::new(9).expect("valid test id")),
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: Some(near_id),
+                        next_sibling_id: None,
+                    },
+                ),
+            ]),
+            root_id: NodeId::new(99).expect("valid test id"),
+        };
+
+        let view = read_node_context(&repository, current_id, 10).expect("read should succeed");
+        assert!(view.prev_siblings.is_empty());
+        assert_eq!(view.prev_hidden_count, 2);
     }
 
     #[derive(Default)]
