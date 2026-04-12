@@ -435,6 +435,12 @@ pub trait WriteRepository: ReadRepository {
     fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId>;
     /// Creates one daily note date node for the provided ISO date.
     fn create_daily_note_node(&mut self, note_date: &str) -> KernelResult<NodeId>;
+    /// Atomically ensures one daily note exists and appends one child note under it.
+    fn create_note_in_daily_note(
+        &mut self,
+        note_date: &str,
+        node: &NewNodeRecord,
+    ) -> KernelResult<NodeId>;
 }
 
 /// Parses a validated content line into plain-text and link fragments.
