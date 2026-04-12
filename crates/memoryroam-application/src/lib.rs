@@ -10,6 +10,7 @@ use memoryroam_domain::{
     render_storage_content,
 };
 use memoryroam_write::update_nodes;
+use std::collections::BTreeSet;
 
 const DEFAULT_MATCH_LIMIT: usize = 50;
 
@@ -517,8 +518,16 @@ fn choose_backlinks<R: ReadRepository>(
     mut used_tokens: usize,
     soft_limit: usize,
 ) -> KernelResult<(Vec<BacklinkLine>, usize, usize)> {
-    let mut backlinks = Vec::new();
+    let mut seen_sources = BTreeSet::new();
+    let mut unique_backlink_inputs = Vec::new();
     for incoming in incoming_links {
+        if seen_sources.insert(incoming.source_node_id) {
+            unique_backlink_inputs.push(incoming);
+        }
+    }
+
+    let mut backlinks = Vec::new();
+    for incoming in unique_backlink_inputs {
         let line = BacklinkLine {
             source: NodeLine {
                 id: incoming.source_node_id,
@@ -533,7 +542,7 @@ fn choose_backlinks<R: ReadRepository>(
         backlinks.push(line);
     }
 
-    let hidden = incoming_links.len().saturating_sub(backlinks.len());
+    let hidden = seen_sources.len().saturating_sub(backlinks.len());
     Ok((backlinks, hidden, used_tokens))
 }
 
@@ -678,6 +687,15 @@ mod tests {
 
         let result = create_root(&mut store, "2026").expect("numeric root should be created");
         assert_eq!(result.root.rendered_content, "2026");
+    }
+
+    #[test]
+    fn create_root_accepts_double_colon_plain_text() {
+        let mut store = store();
+
+        let result =
+            create_root(&mut store, "std::fmt").expect("plain text root should be created");
+        assert_eq!(result.root.rendered_content, "std::fmt");
     }
 
     #[test]
@@ -904,6 +922,152 @@ mod tests {
         let error =
             create_root(&mut store, "See {{Topic}}").expect_err("link-bearing root should fail");
         assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn read_context_deduplicates_backlinks_from_the_same_source() {
+        #[derive(Default)]
+        struct Repository {
+            nodes: BTreeMap<NodeId, StoredNode>,
+            incoming_links: BTreeMap<NodeId, Vec<IncomingLinkRecord>>,
+        }
+
+        impl ReadRepository for Repository {
+            fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+                Ok(self.nodes.get(&node_id).cloned())
+            }
+
+            fn list_children(&self, _parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+                Ok(Vec::new())
+            }
+
+            fn list_outgoing_links(&self, _node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+                Ok(Vec::new())
+            }
+
+            fn list_incoming_links(
+                &self,
+                node_id: NodeId,
+            ) -> KernelResult<Vec<IncomingLinkRecord>> {
+                Ok(self
+                    .incoming_links
+                    .get(&node_id)
+                    .cloned()
+                    .unwrap_or_default())
+            }
+
+            fn list_aliases(&self, _node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+                Ok(Vec::new())
+            }
+
+            fn fetch_node_contents(
+                &self,
+                node_ids: &BTreeSet<NodeId>,
+            ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+                Ok(node_ids
+                    .iter()
+                    .filter_map(|node_id| {
+                        self.nodes
+                            .get(node_id)
+                            .map(|node| (*node_id, node.content.clone()))
+                    })
+                    .collect())
+            }
+
+            fn lookup_candidates(&self, _key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+                Ok(Vec::new())
+            }
+
+            fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+                Ok(format!("path:{node_id}"))
+            }
+
+            fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+                Ok(None)
+            }
+
+            fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+                Ok(Vec::new())
+            }
+
+            fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+                Ok(false)
+            }
+
+            fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+                Ok(false)
+            }
+
+            fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+                Ok(Vec::new())
+            }
+
+            fn find_root_node_by_content(
+                &self,
+                _content: &ContentLine,
+            ) -> KernelResult<Option<StoredNode>> {
+                Ok(None)
+            }
+
+            fn search_text_matches(&self, _needle: &str) -> KernelResult<Vec<StoredNode>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let target_id = NodeId::new(1).expect("valid test id");
+        let source_id = NodeId::new(2).expect("valid test id");
+        let repository = Repository {
+            nodes: BTreeMap::from([
+                (
+                    target_id,
+                    StoredNode {
+                        id: target_id,
+                        content: ContentLine::parse("Target").expect("content should parse"),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: None,
+                        next_sibling_id: None,
+                    },
+                ),
+                (
+                    source_id,
+                    StoredNode {
+                        id: source_id,
+                        content: ContentLine::parse("Source {{1}} {{1}}")
+                            .expect("content should parse"),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: None,
+                        next_sibling_id: None,
+                    },
+                ),
+            ]),
+            incoming_links: BTreeMap::from([(
+                target_id,
+                vec![
+                    IncomingLinkRecord {
+                        source_node_id: source_id,
+                        source_content: ContentLine::parse("Source {{1}} {{1}}")
+                            .expect("content should parse"),
+                        ordinal: 1,
+                        path: String::from("path:2"),
+                    },
+                    IncomingLinkRecord {
+                        source_node_id: source_id,
+                        source_content: ContentLine::parse("Source {{1}} {{1}}")
+                            .expect("content should parse"),
+                        ordinal: 2,
+                        path: String::from("path:2"),
+                    },
+                ],
+            )]),
+        };
+
+        let view = read_node_context(&repository, target_id, 5500).expect("read should succeed");
+        assert_eq!(view.backlinks.len(), 1);
+        assert_eq!(view.hidden_backlink_count, 0);
     }
 
     #[test]

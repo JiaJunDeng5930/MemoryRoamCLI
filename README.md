@@ -66,6 +66,7 @@ cargo run --bin memoryroam -- --db notes.sqlite3 init
 
 All non-`init` commands require an existing database file.
 If the file does not exist, the command fails instead of silently creating an empty database.
+This unreleased branch does not provide schema migration or backward compatibility for older database files.
 
 ## Common Tasks
 
