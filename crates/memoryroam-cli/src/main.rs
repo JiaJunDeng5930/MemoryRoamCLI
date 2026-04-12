@@ -187,7 +187,7 @@ fn print_day_view(view: &DayView, database_path: &Path) {
         if view.note_date == today_date() {
             println!(
                 "use: memoryroam --db {} note \"...\"",
-                database_path.display()
+                shell_quote_path(database_path)
             );
         }
         return;
@@ -258,4 +258,10 @@ fn print_read_context(view: &ReadContextView) {
     if view.next_hidden_count > 0 {
         println!("...next {} sibling hiding...", view.next_hidden_count);
     }
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    let raw = path.display().to_string();
+    let escaped = raw.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }

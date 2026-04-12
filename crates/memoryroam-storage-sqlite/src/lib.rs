@@ -959,13 +959,22 @@ impl WriteRepository for SqliteStore {
                     aliases: Vec::new(),
                 };
                 let note_node_id = insert_top_level_node(&transaction, &note_node)?;
-                transaction
-                    .execute(
-                        "INSERT INTO daily_notes (note_date, node_id) VALUES (?1, ?2)",
-                        params![note_date, note_node_id.value()],
-                    )
-                    .map_err(map_sqlite_error)?;
-                note_node_id
+                match transaction.execute(
+                    "INSERT INTO daily_notes (note_date, node_id) VALUES (?1, ?2)",
+                    params![note_date, note_node_id.value()],
+                ) {
+                    Ok(_) => note_node_id,
+                    Err(error) => match map_sqlite_error(error) {
+                        KernelError::Constraint(_) => {
+                            find_daily_note_from_handle(&transaction, note_date)?
+                                .map(|record| record.node_id)
+                                .ok_or(KernelError::Constraint(format!(
+                                    "daily note {note_date} could not be created"
+                                )))?
+                        }
+                        other => return Err(other),
+                    },
+                }
             }
         };
 
