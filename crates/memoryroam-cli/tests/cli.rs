@@ -170,3 +170,16 @@ fn cli_failed_note_does_not_leave_an_empty_daily_note() {
         .success()
         .stdout(predicate::str::contains("empty"));
 }
+
+#[test]
+fn cli_day_rejects_invalid_dates() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+
+    command(&temp_dir).arg("init").assert().success();
+
+    command(&temp_dir)
+        .args(["day", "2026-99-99"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid day date"));
+}
