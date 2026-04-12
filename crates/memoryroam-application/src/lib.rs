@@ -3,6 +3,7 @@
 #![warn(rustdoc::private_intra_doc_links)]
 #![doc = include_str!("../README.md")]
 
+use chrono::NaiveDate;
 use memoryroam_domain::{
     ContentFragment, ContentLine, IncomingLinkRecord, KernelError, KernelResult, NodeId, NodeLine,
     ParsedLink, ReadRepository, StoredNode, canonicalize_content, parse_content,
@@ -74,6 +75,7 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
     note_date: &str,
     raw_content: &str,
 ) -> KernelResult<NoteResult> {
+    validate_day_date(note_date, "invalid daily note date")?;
     let node = build_new_node(repository, raw_content)?;
     let note_node_id = match repository.find_daily_note(note_date)? {
         Some(record) => record.node_id,
@@ -106,6 +108,7 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
 }
 
 pub fn open_day<R: ReadRepository>(repository: &R, note_date: &str) -> KernelResult<DayView> {
+    validate_day_date(note_date, "invalid day date")?;
     let entries = match repository.find_daily_note(note_date)? {
         Some(record) => repository
             .list_children(Some(record.node_id))?
@@ -560,6 +563,12 @@ fn estimate_tokens(text: &str) -> usize {
     8 + non_ascii_count + ascii_count.div_ceil(3)
 }
 
+fn validate_day_date(note_date: &str, error_message: &str) -> KernelResult<()> {
+    NaiveDate::parse_from_str(note_date, "%F")
+        .map(|_| ())
+        .map_err(|_| KernelError::Input(String::from(error_message)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +636,14 @@ mod tests {
             create_root(&mut store, " Topic ").expect("second root should reuse the first root");
 
         assert_eq!(first.root.id, second.root.id);
+    }
+
+    #[test]
+    fn create_root_accepts_numeric_content() {
+        let mut store = store();
+
+        let result = create_root(&mut store, "2026").expect("numeric root should be created");
+        assert_eq!(result.root.rendered_content, "2026");
     }
 
     #[derive(Default)]
