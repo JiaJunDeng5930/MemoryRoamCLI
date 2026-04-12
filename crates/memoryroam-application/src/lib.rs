@@ -132,6 +132,7 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     let content =
         ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
     ensure_plain_text_root(&content)?;
+    ensure_safe_root_label_text(content.as_str())?;
     let root = match repository.find_root_node_by_content(&content)? {
         Some(node) => node,
         None => {
@@ -198,11 +199,7 @@ pub fn apply_root_link<R: ReadRepository + memoryroam_domain::WriteRepository>(
     }
 
     let target_text = target_text.unwrap_or(root.content.as_str());
-    if target_text.is_empty() || target_text.contains('\n') || target_text.contains('\r') {
-        return Err(KernelError::Input(String::from(
-            "root apply text must be a non-empty single line",
-        )));
-    }
+    ensure_safe_root_label_text(target_text)?;
 
     let mut updates = Vec::with_capacity(node_ids.len());
     for node_id in node_ids {
@@ -616,6 +613,20 @@ fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     Ok(())
 }
 
+fn ensure_safe_root_label_text(text: &str) -> KernelResult<()> {
+    if text.is_empty() || text.contains('\n') || text.contains('\r') {
+        return Err(KernelError::Input(String::from(
+            "root apply text must be a non-empty single line",
+        )));
+    }
+    if text.contains("{{") || text.contains("}}") {
+        return Err(KernelError::Input(String::from(
+            "root text cannot contain raw link delimiters",
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -946,6 +957,15 @@ mod tests {
 
         let error =
             create_root(&mut store, "See {{Topic}}").expect_err("link-bearing root should fail");
+        assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn create_root_rejects_raw_closing_braces() {
+        let mut store = store();
+
+        let error =
+            create_root(&mut store, "foo}}bar").expect_err("raw closing braces should be rejected");
         assert!(matches!(error, KernelError::Input(_)));
     }
 
