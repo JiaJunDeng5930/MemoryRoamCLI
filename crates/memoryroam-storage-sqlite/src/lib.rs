@@ -184,6 +184,22 @@ BEGIN
     );
 END;
 
+CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key
+BEFORE INSERT ON root_nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM root_nodes AS r
+    JOIN nodes AS existing
+      ON existing.id = r.node_id
+    JOIN nodes AS incoming
+      ON incoming.id = NEW.node_id
+    WHERE existing.content_lookup_key = incoming.content_lookup_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate root lookup key');
+END;
+
 CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert
 BEFORE INSERT ON daily_notes
 FOR EACH ROW
@@ -363,6 +379,22 @@ BEGIN
         FROM daily_notes
         WHERE node_id = NEW.node_id
     );
+END;
+
+CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key
+BEFORE INSERT ON root_nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM root_nodes AS r
+    JOIN nodes AS existing
+      ON existing.id = r.node_id
+    JOIN nodes AS incoming
+      ON incoming.id = NEW.node_id
+    WHERE existing.content_lookup_key = incoming.content_lookup_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate root lookup key');
 END;
 
 CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert

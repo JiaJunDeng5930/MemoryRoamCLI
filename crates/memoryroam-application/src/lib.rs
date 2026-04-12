@@ -135,12 +135,21 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
         Some(node) => node,
         None => {
             let node = build_new_node(repository, raw_content)?;
-            let node_id = repository.create_root_node(&node)?;
-            repository
-                .get_node(node_id)?
-                .ok_or(KernelError::StorageCorruption(format!(
-                    "missing created root node {node_id}"
-                )))?
+            match repository.create_root_node(&node) {
+                Ok(node_id) => {
+                    repository
+                        .get_node(node_id)?
+                        .ok_or(KernelError::StorageCorruption(format!(
+                            "missing created root node {node_id}"
+                        )))?
+                }
+                Err(KernelError::Constraint(_)) => repository
+                    .find_root_node_by_content(&content)?
+                    .ok_or(KernelError::Constraint(String::from(
+                        "root could not be created or reused",
+                    )))?,
+                Err(error) => return Err(error),
+            }
         }
     };
 
@@ -199,6 +208,11 @@ pub fn apply_root_link<R: ReadRepository + memoryroam_domain::WriteRepository>(
         if repository.is_daily_note_node(*node_id)? {
             return Err(KernelError::Constraint(String::from(
                 "daily note date nodes are immutable",
+            )));
+        }
+        if repository.is_root_node(*node_id)? {
+            return Err(KernelError::Constraint(String::from(
+                "root nodes cannot be rewritten",
             )));
         }
 
@@ -890,5 +904,180 @@ mod tests {
         let error =
             create_root(&mut store, "See {{Topic}}").expect_err("link-bearing root should fail");
         assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn apply_root_rejects_root_nodes_as_targets() {
+        let mut store = store();
+
+        let first = create_root(&mut store, "Topic").expect("first root should be created");
+        let second = create_root(&mut store, "Topic map").expect("second root should be created");
+
+        let error = apply_root_link(&mut store, first.root.id, None, &[second.root.id])
+            .expect_err("root nodes should not be rewritten");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[derive(Default)]
+    struct RootRaceRepository {
+        existing_root: Option<StoredNode>,
+        create_attempts: usize,
+    }
+
+    impl ReadRepository for RootRaceRepository {
+        fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+            Ok(self
+                .existing_root
+                .as_ref()
+                .filter(|node| node.id == node_id)
+                .cloned())
+        }
+
+        fn list_children(&self, _parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn list_outgoing_links(&self, _node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn list_incoming_links(&self, _node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn list_aliases(&self, _node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_node_contents(
+            &self,
+            _node_ids: &BTreeSet<NodeId>,
+        ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+            Ok(BTreeMap::new())
+        }
+
+        fn lookup_candidates(&self, _key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+            Ok(Vec::new())
+        }
+
+        fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+            Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(None)
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+            Ok(self
+                .existing_root
+                .as_ref()
+                .is_some_and(|node| node.id == node_id))
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(self.existing_root.clone().into_iter().collect())
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            _content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            Ok(self.existing_root.clone())
+        }
+
+        fn search_text_matches(&self, _needle: &str) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl WriteRepository for RootRaceRepository {
+        fn init_schema(&mut self) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_nodes_from_lines(
+            &mut self,
+            _placement: Placement,
+            _lines: &[ContentLine],
+            _aliases: &[AliasText],
+        ) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn create_nodes(
+            &mut self,
+            _placement: Placement,
+            _nodes: &[NewNodeRecord],
+        ) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn update_node_contents(
+            &mut self,
+            _updates: &[memoryroam_domain::NodeUpdateRecord],
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn move_node(&mut self, _node_id: NodeId, _placement: Placement) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn delete_node(
+            &mut self,
+            _node_id: NodeId,
+            _mode: memoryroam_domain::DeleteMode,
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn add_aliases(&mut self, _node_id: NodeId, _aliases: &[AliasText]) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn remove_alias(&mut self, _node_id: NodeId, _alias: &AliasText) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId> {
+            self.create_attempts += 1;
+            let node_id = NodeId::new(1).expect("valid test id");
+            self.existing_root = Some(StoredNode {
+                id: node_id,
+                content: node.content.clone(),
+                parent_id: None,
+                first_child_id: None,
+                last_child_id: None,
+                prev_sibling_id: None,
+                next_sibling_id: None,
+            });
+            Err(KernelError::Constraint(String::from(
+                "duplicate root lookup key",
+            )))
+        }
+
+        fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> {
+            Ok(NodeId::new(1).expect("valid test id"))
+        }
+    }
+
+    #[test]
+    fn create_root_reuses_existing_root_after_conflicting_create() {
+        let mut repository = RootRaceRepository::default();
+
+        let result = create_root(&mut repository, "Topic")
+            .expect("root should be reused after conflicting insert");
+
+        assert_eq!(result.root.id, NodeId::new(1).expect("valid test id"));
+        assert_eq!(repository.create_attempts, 1);
     }
 }
