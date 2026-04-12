@@ -77,7 +77,16 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
     let node = build_new_node(repository, raw_content)?;
     let note_node_id = match repository.find_daily_note(note_date)? {
         Some(record) => record.node_id,
-        None => repository.create_daily_note_node(note_date)?,
+        None => match repository.create_daily_note_node(note_date) {
+            Ok(node_id) => node_id,
+            Err(KernelError::Constraint(_)) => repository
+                .find_daily_note(note_date)?
+                .map(|record| record.node_id)
+                .ok_or(KernelError::Constraint(format!(
+                    "daily note {note_date} could not be created"
+                )))?,
+            Err(error) => return Err(error),
+        },
     };
 
     let node_id = repository.create_nodes(
@@ -554,6 +563,12 @@ fn estimate_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use memoryroam_domain::{
+        AliasText, DailyNoteRecord, IncomingLinkRecord, LookupCandidate, LookupKey, NewNodeRecord,
+        Placement, StoredNode, WriteRepository,
+    };
     use memoryroam_storage_sqlite::SqliteStore;
     use memoryroam_write::init;
     use tempfile::NamedTempFile;
@@ -601,5 +616,214 @@ mod tests {
                 .expect("daily notes should load")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn create_root_reuses_existing_root_by_normalized_lookup_key() {
+        let mut store = store();
+
+        let first = create_root(&mut store, "Topic").expect("first root should be created");
+        let second =
+            create_root(&mut store, " Topic ").expect("second root should reuse the first root");
+
+        assert_eq!(first.root.id, second.root.id);
+    }
+
+    #[derive(Default)]
+    struct RaceRepository {
+        nodes: BTreeMap<NodeId, StoredNode>,
+        daily_note: Option<DailyNoteRecord>,
+        next_id: i64,
+        create_daily_note_attempts: usize,
+    }
+
+    impl ReadRepository for RaceRepository {
+        fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+            Ok(self.nodes.get(&node_id).cloned())
+        }
+
+        fn list_children(&self, _parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn list_outgoing_links(&self, _node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn list_incoming_links(&self, _node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn list_aliases(&self, _node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_node_contents(
+            &self,
+            node_ids: &BTreeSet<NodeId>,
+        ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+            Ok(node_ids
+                .iter()
+                .filter_map(|node_id| {
+                    self.nodes
+                        .get(node_id)
+                        .map(|node| (*node_id, node.content.clone()))
+                })
+                .collect())
+        }
+
+        fn lookup_candidates(&self, _key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+            Ok(Vec::new())
+        }
+
+        fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+            Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(self.daily_note.clone())
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(self.daily_note.clone().into_iter().collect())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            _content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            Ok(None)
+        }
+
+        fn search_text_matches(&self, _needle: &str) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl WriteRepository for RaceRepository {
+        fn init_schema(&mut self) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_nodes_from_lines(
+            &mut self,
+            _placement: Placement,
+            _lines: &[ContentLine],
+            _aliases: &[AliasText],
+        ) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn create_nodes(
+            &mut self,
+            placement: Placement,
+            nodes: &[NewNodeRecord],
+        ) -> KernelResult<Vec<NodeId>> {
+            assert_eq!(nodes.len(), 1);
+            let parent_id = match placement {
+                Placement::LastChildOf(parent_id) => parent_id,
+                other => panic!("unexpected placement {other:?}"),
+            };
+            self.next_id += 1;
+            let node_id = NodeId::new(self.next_id).expect("valid test id");
+            self.nodes.insert(
+                node_id,
+                StoredNode {
+                    id: node_id,
+                    content: nodes[0].content.clone(),
+                    parent_id: Some(parent_id),
+                    first_child_id: None,
+                    last_child_id: None,
+                    prev_sibling_id: None,
+                    next_sibling_id: None,
+                },
+            );
+            Ok(vec![node_id])
+        }
+
+        fn update_node_contents(
+            &mut self,
+            _updates: &[memoryroam_domain::NodeUpdateRecord],
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn move_node(&mut self, _node_id: NodeId, _placement: Placement) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn delete_node(
+            &mut self,
+            _node_id: NodeId,
+            _mode: memoryroam_domain::DeleteMode,
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn add_aliases(&mut self, _node_id: NodeId, _aliases: &[AliasText]) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn remove_alias(&mut self, _node_id: NodeId, _alias: &AliasText) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_root_node(&mut self, _node: &NewNodeRecord) -> KernelResult<NodeId> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn create_daily_note_node(&mut self, note_date: &str) -> KernelResult<NodeId> {
+            self.create_daily_note_attempts += 1;
+            if self.create_daily_note_attempts == 1 {
+                let node_id = NodeId::new(1).expect("valid test id");
+                self.nodes.insert(
+                    node_id,
+                    StoredNode {
+                        id: node_id,
+                        content: ContentLine::parse(note_date).expect("content should parse"),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: None,
+                        next_sibling_id: None,
+                    },
+                );
+                self.daily_note = Some(DailyNoteRecord {
+                    note_date: note_date.to_owned(),
+                    node_id,
+                });
+                return Err(KernelError::Constraint(String::from(
+                    "unique constraint failed",
+                )));
+            }
+
+            panic!("note_today should retry by re-reading the daily note");
+        }
+    }
+
+    #[test]
+    fn note_today_reuses_daily_note_after_conflicting_first_create() {
+        let mut repository = RaceRepository {
+            next_id: 1,
+            ..RaceRepository::default()
+        };
+
+        let result = note_today(&mut repository, "2026-04-11", "Captured note")
+            .expect("note should succeed after re-reading the daily note");
+
+        assert_eq!(result.note_date, "2026-04-11");
+        assert_eq!(repository.create_daily_note_attempts, 1);
     }
 }
