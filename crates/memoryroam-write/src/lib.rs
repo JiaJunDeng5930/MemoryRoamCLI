@@ -55,8 +55,7 @@ pub fn update_node<R: WriteRepository>(
     node_id: NodeId,
     raw_content: &str,
 ) -> KernelResult<()> {
-    let raw_line =
-        ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
+    let raw_line = prepare_updated_content(repository, node_id, raw_content)?;
     validate_root_update(repository, node_id, &raw_line)?;
 
     let CanonicalizedContent {
@@ -107,8 +106,7 @@ pub fn update_nodes<R: WriteRepository>(
             )));
         }
 
-        let content = ContentLine::parse(raw_content.clone())
-            .map_err(|error| KernelError::Input(error.to_string()))?;
+        let content = prepare_updated_content(repository, *node_id, raw_content)?;
         let root_lookup_key = validate_root_update(repository, *node_id, &content)?;
         if let Some(root_lookup_key) = root_lookup_key
             && !seen_root_lookup_keys.insert(root_lookup_key)
@@ -265,15 +263,30 @@ fn validate_root_update<R: WriteRepository>(
 
     ensure_plain_text_root(raw_line)?;
     ensure_safe_root_label_text(raw_line.as_str())?;
-    if let Some(existing_root) = repository.find_root_node_by_content(raw_line)?
-        && existing_root.id != node_id
-    {
+    let normalized = raw_line.as_str().trim();
+    let duplicate_root_exists = repository
+        .list_root_nodes()?
+        .into_iter()
+        .any(|root| root.id != node_id && root.content.as_str().trim() == normalized);
+    if duplicate_root_exists {
         return Err(KernelError::Constraint(String::from(
             "root lookup keys must stay unique",
         )));
     }
 
-    Ok(Some(raw_line.as_str().trim().to_owned()))
+    Ok(Some(normalized.to_owned()))
+}
+
+fn prepare_updated_content<R: WriteRepository>(
+    repository: &R,
+    node_id: NodeId,
+    raw_content: &str,
+) -> KernelResult<ContentLine> {
+    if repository.is_root_node(node_id)? {
+        return normalize_root_content(raw_content);
+    }
+
+    ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))
 }
 
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
@@ -297,6 +310,10 @@ fn ensure_safe_root_label_text(text: &str) -> KernelResult<()> {
         )));
     }
     Ok(())
+}
+
+fn normalize_root_content(raw_content: &str) -> KernelResult<ContentLine> {
+    ContentLine::parse(raw_content.trim()).map_err(|error| KernelError::Input(error.to_string()))
 }
 
 #[cfg(test)]
@@ -395,7 +412,11 @@ mod tests {
         }
 
         fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
-            Ok(Vec::new())
+            Ok(self
+                .root_nodes
+                .iter()
+                .filter_map(|node_id| self.existing.get(node_id).cloned())
+                .collect())
         }
 
         fn find_root_node_by_content(
@@ -683,6 +704,18 @@ mod tests {
             .insert(second_id, stored_node(2, "Other"));
         repository.root_nodes.insert(first_id);
         repository.root_nodes.insert(second_id);
+        assert!(
+            repository
+                .is_root_node(second_id)
+                .expect("root state should load")
+        );
+        assert_eq!(
+            repository
+                .list_root_nodes()
+                .expect("root nodes should load")
+                .len(),
+            2
+        );
 
         let error =
             update_node(&mut repository, second_id, "Topic").expect_err("update should fail");
@@ -702,6 +735,11 @@ mod tests {
         repository
             .aliases
             .insert(String::from("Target"), vec![target_id]);
+        assert!(
+            repository
+                .is_root_node(root_id)
+                .expect("root state should load")
+        );
 
         let error = update_node(&mut repository, root_id, "Ref {{Target}}")
             .expect_err("update should fail");
