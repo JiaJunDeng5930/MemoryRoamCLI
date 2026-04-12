@@ -6,8 +6,9 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use memoryroam_domain::{
-    AliasText, CanonicalizedContent, ContentLine, DeleteMode, KernelError, KernelResult, LookupKey,
-    NodeId, NodeUpdateRecord, Placement, WriteRepository, canonicalize_content,
+    AliasText, CanonicalizedContent, ContentFragment, ContentLine, DeleteMode, KernelError,
+    KernelResult, LookupKey, NodeId, NodeUpdateRecord, Placement, WriteRepository,
+    canonicalize_content, parse_content,
 };
 
 /// Initializes the target repository schema.
@@ -54,19 +55,29 @@ pub fn update_node<R: WriteRepository>(
     node_id: NodeId,
     raw_content: &str,
 ) -> KernelResult<()> {
+    let raw_line =
+        ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
     if repository.is_daily_note_node(node_id)? {
         return Err(KernelError::Constraint(String::from(
             "daily note date nodes are immutable",
         )));
     }
+    if repository.is_root_node(node_id)? {
+        ensure_plain_text_root(&raw_line)?;
+        if let Some(existing_root) = repository.find_root_node_by_content(&raw_line)?
+            && existing_root.id != node_id
+        {
+            return Err(KernelError::Constraint(String::from(
+                "root lookup keys must stay unique",
+            )));
+        }
+    }
 
-    let content =
-        ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
     let CanonicalizedContent {
         content,
         lookup_key,
         outgoing_links,
-    } = canonicalize_content(repository, &content)?;
+    } = canonicalize_content(repository, &raw_line)?;
 
     if outgoing_links.contains(&node_id) {
         return Err(KernelError::Constraint(format!(
@@ -243,6 +254,20 @@ pub fn create_lookup_key(raw_value: &str) -> KernelResult<LookupKey> {
     LookupKey::new(raw_value.to_owned()).map_err(|error| KernelError::Input(error.to_string()))
 }
 
+fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
+    let fragments =
+        parse_content(content).map_err(|error| KernelError::Storage(error.to_string()))?;
+    if fragments
+        .iter()
+        .any(|fragment| matches!(fragment, ContentFragment::Link(_)))
+    {
+        return Err(KernelError::Input(String::from(
+            "root content cannot contain links",
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -257,6 +282,7 @@ mod tests {
         existing: BTreeMap<NodeId, StoredNode>,
         aliases: BTreeMap<String, Vec<NodeId>>,
         outgoing: BTreeMap<NodeId, Vec<NodeId>>,
+        root_nodes: BTreeSet<NodeId>,
         created: Vec<NewNodeRecord>,
         updated: Vec<(NodeId, ContentLine, LookupKey, Vec<NodeId>)>,
         next_created_id: i64,
@@ -333,8 +359,8 @@ mod tests {
             Ok(false)
         }
 
-        fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> {
-            Ok(false)
+        fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+            Ok(self.root_nodes.contains(&node_id))
         }
 
         fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
@@ -343,9 +369,15 @@ mod tests {
 
         fn find_root_node_by_content(
             &self,
-            _content: &ContentLine,
+            content: &ContentLine,
         ) -> KernelResult<Option<StoredNode>> {
-            Ok(None)
+            let normalized = content.as_str().trim();
+            Ok(self.root_nodes.iter().find_map(|node_id| {
+                self.existing
+                    .get(node_id)
+                    .filter(|node| node.content.as_str().trim() == normalized)
+                    .cloned()
+            }))
         }
 
         fn search_text_matches(&self, _needle: &str) -> KernelResult<Vec<StoredNode>> {
@@ -467,8 +499,11 @@ mod tests {
         }
 
         fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId> {
-            self.create_nodes(Placement::TopLevelLast, std::slice::from_ref(node))
-                .map(|mut ids| ids.remove(0))
+            let node_id = self
+                .create_nodes(Placement::TopLevelLast, std::slice::from_ref(node))
+                .map(|mut ids| ids.remove(0))?;
+            self.root_nodes.insert(node_id);
+            Ok(node_id)
         }
 
         fn create_daily_note_node(&mut self, note_date: &str) -> KernelResult<NodeId> {
@@ -602,5 +637,43 @@ mod tests {
             .expect_err("indirect cycles should be rejected");
 
         assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn update_node_rejects_duplicate_root_lookup_keys() {
+        let mut repository = FakeRepository::default();
+        let first_id = NodeId::new(1).expect("valid test id");
+        let second_id = NodeId::new(2).expect("valid test id");
+        repository
+            .existing
+            .insert(first_id, stored_node(1, "Topic"));
+        repository
+            .existing
+            .insert(second_id, stored_node(2, "Other"));
+        repository.root_nodes.insert(first_id);
+        repository.root_nodes.insert(second_id);
+
+        let error =
+            update_node(&mut repository, second_id, "Topic").expect_err("update should fail");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn update_node_rejects_link_bearing_root_content() {
+        let mut repository = FakeRepository::default();
+        let root_id = NodeId::new(1).expect("valid test id");
+        let target_id = NodeId::new(2).expect("valid test id");
+        repository.existing.insert(root_id, stored_node(1, "Root"));
+        repository
+            .existing
+            .insert(target_id, stored_node(2, "Target"));
+        repository.root_nodes.insert(root_id);
+        repository
+            .aliases
+            .insert(String::from("Target"), vec![target_id]);
+
+        let error = update_node(&mut repository, root_id, "Ref {{Target}}")
+            .expect_err("update should fail");
+        assert!(matches!(error, KernelError::Input(_)));
     }
 }

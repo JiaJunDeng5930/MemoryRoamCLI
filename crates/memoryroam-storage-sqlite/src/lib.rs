@@ -182,6 +182,18 @@ BEGIN
         FROM daily_notes
         WHERE node_id = NEW.node_id
     );
+
+    SELECT RAISE(ABORT, 'root nodes cannot contain links')
+    WHERE EXISTS (
+        SELECT 1
+        FROM nodes
+        WHERE id = NEW.node_id
+          AND (
+              instr(content, '{{') > 0
+              OR instr(content, '}}') > 0
+              OR instr(content, '::') > 0
+          )
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key
@@ -198,6 +210,43 @@ WHEN EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'duplicate root lookup key');
+END;
+
+CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key_on_update
+BEFORE UPDATE OF content_lookup_key ON nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM root_nodes
+    WHERE node_id = OLD.id
+)
+AND EXISTS (
+    SELECT 1
+    FROM root_nodes AS r
+    JOIN nodes AS existing
+      ON existing.id = r.node_id
+    WHERE r.node_id <> OLD.id
+      AND existing.content_lookup_key = NEW.content_lookup_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate root lookup key');
+END;
+
+CREATE TRIGGER IF NOT EXISTS root_nodes_reject_link_syntax_on_update
+BEFORE UPDATE OF content ON nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM root_nodes
+    WHERE node_id = OLD.id
+)
+AND (
+    instr(NEW.content, '{{') > 0
+    OR instr(NEW.content, '}}') > 0
+    OR instr(NEW.content, '::') > 0
+)
+BEGIN
+    SELECT RAISE(ABORT, 'root nodes cannot contain links');
 END;
 
 CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert
@@ -379,6 +428,18 @@ BEGIN
         FROM daily_notes
         WHERE node_id = NEW.node_id
     );
+
+    SELECT RAISE(ABORT, 'root nodes cannot contain links')
+    WHERE EXISTS (
+        SELECT 1
+        FROM nodes
+        WHERE id = NEW.node_id
+          AND (
+              instr(content, '{{') > 0
+              OR instr(content, '}}') > 0
+              OR instr(content, '::') > 0
+          )
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key
@@ -395,6 +456,43 @@ WHEN EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'duplicate root lookup key');
+END;
+
+CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key_on_update
+BEFORE UPDATE OF content_lookup_key ON nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM root_nodes
+    WHERE node_id = OLD.id
+)
+AND EXISTS (
+    SELECT 1
+    FROM root_nodes AS r
+    JOIN nodes AS existing
+      ON existing.id = r.node_id
+    WHERE r.node_id <> OLD.id
+      AND existing.content_lookup_key = NEW.content_lookup_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate root lookup key');
+END;
+
+CREATE TRIGGER IF NOT EXISTS root_nodes_reject_link_syntax_on_update
+BEFORE UPDATE OF content ON nodes
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM root_nodes
+    WHERE node_id = OLD.id
+)
+AND (
+    instr(NEW.content, '{{') > 0
+    OR instr(NEW.content, '}}') > 0
+    OR instr(NEW.content, '::') > 0
+)
+BEGIN
+    SELECT RAISE(ABORT, 'root nodes cannot contain links');
 END;
 
 CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert
