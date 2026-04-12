@@ -2251,14 +2251,35 @@ fn shift_root_sort_orders_from(
     if delta == 0 {
         return Ok(());
     }
-    transaction
-        .execute(
-            "UPDATE root_nodes
-             SET sort_order = sort_order + ?1
-             WHERE sort_order >= ?2",
-            params![delta, start_sort_order],
+    let mut statement = transaction
+        .prepare(
+            "SELECT node_id, sort_order
+             FROM root_nodes
+             WHERE sort_order >= ?1
+             ORDER BY sort_order DESC",
         )
         .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map(params![start_sort_order], |row| {
+            Ok((node_id_from_row(row, 0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(map_sqlite_error)?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row.map_err(map_sqlite_error)?);
+    }
+
+    for (node_id, sort_order) in entries {
+        transaction
+            .execute(
+                "UPDATE root_nodes
+                 SET sort_order = ?1
+                 WHERE node_id = ?2",
+                params![sort_order + delta, node_id.value()],
+            )
+            .map_err(map_sqlite_error)?;
+    }
     Ok(())
 }
 
@@ -2275,16 +2296,56 @@ fn remove_top_level_nodes(transaction: &Transaction<'_>, node_ids: &[NodeId]) ->
     }
     sort_orders.sort_unstable();
     for removed_sort_order in sort_orders {
-        transaction
-            .execute(
-                "UPDATE root_nodes
-                 SET sort_order = sort_order - 1
-                 WHERE sort_order > ?1",
-                params![removed_sort_order],
+        let mut statement = transaction
+            .prepare(
+                "SELECT node_id, sort_order
+                 FROM root_nodes
+                 WHERE sort_order > ?1
+                 ORDER BY sort_order ASC",
             )
             .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map(params![removed_sort_order], |row| {
+                Ok((node_id_from_row(row, 0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(map_sqlite_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.map_err(map_sqlite_error)?);
+        }
+
+        for (node_id, sort_order) in entries {
+            transaction
+                .execute(
+                    "UPDATE root_nodes
+                     SET sort_order = ?1
+                     WHERE node_id = ?2",
+                    params![sort_order - 1, node_id.value()],
+                )
+                .map_err(map_sqlite_error)?;
+        }
     }
     Ok(())
+}
+
+fn ensure_node_is_valid_root(transaction: &Transaction<'_>, node_id: NodeId) -> KernelResult<()> {
+    let node = fetch_node(transaction, node_id)?.ok_or(KernelError::NotFound {
+        entity: "node",
+        id: node_id,
+    })?;
+    let fragments = memoryroam_domain::parse_content(&node.content)
+        .map_err(|error| KernelError::Input(error.to_string()))?;
+    if fragments
+        .iter()
+        .any(|fragment| matches!(fragment, memoryroam_domain::ContentFragment::Link(_)))
+    {
+        return Err(KernelError::Input(String::from(
+            "root content cannot contain links",
+        )));
+    }
+    LookupKey::new(node.content.as_str().to_owned())
+        .map(|_| ())
+        .map_err(|error| KernelError::Input(error.to_string()))
 }
 
 fn register_top_level_nodes(
@@ -2299,6 +2360,7 @@ fn register_top_level_nodes(
     shift_root_sort_orders_from(transaction, start_sort_order, node_ids.len() as i64)?;
 
     for (index, node_id) in node_ids.iter().enumerate() {
+        ensure_node_is_valid_root(transaction, *node_id)?;
         transaction
             .execute(
                 "UPDATE nodes
@@ -2719,6 +2781,43 @@ mod tests {
         let roots = store.list_root_nodes().expect("root nodes should load");
         assert_eq!(roots[0].content.as_str(), "Beta");
         assert_eq!(roots[1].content.as_str(), "Alpha");
+    }
+
+    #[test]
+    fn top_level_first_inserts_before_existing_roots_without_sort_conflicts() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        create_nodes(&mut store, "A", &[], Placement::TopLevelLast).expect("create A");
+        create_nodes(&mut store, "B", &[], Placement::TopLevelLast).expect("create B");
+        create_nodes(&mut store, "C", &[], Placement::TopLevelFirst).expect("create C");
+
+        let roots = store.list_root_nodes().expect("root nodes should load");
+        assert_eq!(roots[0].content.as_str(), "C");
+        assert_eq!(roots[1].content.as_str(), "A");
+        assert_eq!(roots[2].content.as_str(), "B");
+    }
+
+    #[test]
+    fn moving_link_bearing_node_to_top_level_is_rejected() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        let root_id = store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root node should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        let linked_id = create_nodes(
+            &mut store,
+            &format!("Ref {{{{{root_id}}}}}"),
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect("linked note should be created")[0];
+
+        let error = move_node(&mut store, linked_id, Placement::TopLevelLast)
+            .expect_err("invalid root promotion should fail");
+        assert!(matches!(error, KernelError::Input(_)));
     }
 
     #[test]
