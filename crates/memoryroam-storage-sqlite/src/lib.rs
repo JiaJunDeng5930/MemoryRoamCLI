@@ -2328,12 +2328,17 @@ fn remove_top_level_nodes(transaction: &Transaction<'_>, node_ids: &[NodeId]) ->
     Ok(())
 }
 
-fn ensure_node_is_valid_root(transaction: &Transaction<'_>, node_id: NodeId) -> KernelResult<()> {
+fn normalize_node_for_root_promotion(
+    transaction: &Transaction<'_>,
+    node_id: NodeId,
+) -> KernelResult<()> {
     let node = fetch_node(transaction, node_id)?.ok_or(KernelError::NotFound {
         entity: "node",
         id: node_id,
     })?;
-    let fragments = memoryroam_domain::parse_content(&node.content)
+    let normalized_content = ContentLine::parse(node.content.as_str().trim())
+        .map_err(|error| KernelError::Input(error.to_string()))?;
+    let fragments = memoryroam_domain::parse_content(&normalized_content)
         .map_err(|error| KernelError::Input(error.to_string()))?;
     if fragments
         .iter()
@@ -2343,9 +2348,22 @@ fn ensure_node_is_valid_root(transaction: &Transaction<'_>, node_id: NodeId) -> 
             "root content cannot contain links",
         )));
     }
-    LookupKey::new(node.content.as_str().to_owned())
-        .map(|_| ())
-        .map_err(|error| KernelError::Input(error.to_string()))
+    let normalized_lookup_key = LookupKey::new(normalized_content.as_str().to_owned())
+        .map_err(|error| KernelError::Input(error.to_string()))?;
+    transaction
+        .execute(
+            "UPDATE nodes
+             SET content = ?1,
+                 content_lookup_key = ?2
+             WHERE id = ?3",
+            params![
+                normalized_content.as_str(),
+                normalized_lookup_key.as_str(),
+                node_id.value()
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(())
 }
 
 fn register_top_level_nodes(
@@ -2360,7 +2378,7 @@ fn register_top_level_nodes(
     shift_root_sort_orders_from(transaction, start_sort_order, node_ids.len() as i64)?;
 
     for (index, node_id) in node_ids.iter().enumerate() {
-        ensure_node_is_valid_root(transaction, *node_id)?;
+        normalize_node_for_root_promotion(transaction, *node_id)?;
         transaction
             .execute(
                 "UPDATE nodes

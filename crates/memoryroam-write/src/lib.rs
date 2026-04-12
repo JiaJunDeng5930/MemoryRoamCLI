@@ -448,13 +448,28 @@ impl<R: WriteRepository> ReadRepository for PendingUpdateRepository<'_, R> {
             .base
             .lookup_candidates(key)?
             .into_iter()
-            .map(|mut candidate| {
-                if let Some(update) = self.pending_updates.get(&candidate.node_id) {
-                    candidate.content = update.content.clone();
+            .filter_map(|mut candidate| {
+                let Some(update) = self.pending_updates.get(&candidate.node_id) else {
+                    return Some(Ok(candidate));
+                };
+
+                let alias_matches = self
+                    .base
+                    .list_aliases(candidate.node_id)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|alias| LookupKey::from_alias(&alias).ok())
+                    .any(|alias_key| alias_key.as_str() == key.as_str());
+                let updated_content_matches = update.lookup_key.as_str() == key.as_str();
+                if !alias_matches && !updated_content_matches {
+                    return None;
                 }
-                candidate
+
+                candidate.content = update.content.clone();
+                Some(Ok(candidate))
             })
-            .collect::<Vec<_>>();
+            .collect::<KernelResult<Vec<_>>>()?;
 
         for (node_id, update) in self.pending_updates {
             let already_present = candidates
@@ -565,7 +580,12 @@ mod tests {
         }
 
         fn list_aliases(&self, _node_id: NodeId) -> KernelResult<Vec<AliasText>> {
-            Ok(Vec::new())
+            Ok(self
+                .aliases
+                .iter()
+                .filter(|(_, node_ids)| node_ids.contains(&_node_id))
+                .map(|(alias, _)| AliasText::new(alias.clone()).expect("alias should parse"))
+                .collect())
         }
 
         fn fetch_node_contents(
