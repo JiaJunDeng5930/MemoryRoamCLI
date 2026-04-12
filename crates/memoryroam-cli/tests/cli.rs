@@ -183,3 +183,22 @@ fn cli_day_rejects_invalid_dates() {
         .failure()
         .stderr(predicate::str::contains("invalid day date"));
 }
+
+#[test]
+fn cli_accepts_text_arguments_that_start_with_a_dash() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+
+    command(&temp_dir).arg("init").assert().success();
+
+    command(&temp_dir)
+        .args(["note", "- first item"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("- first item"));
+
+    command(&temp_dir)
+        .args(["root", "create", "- topic"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("root ["));
+}
