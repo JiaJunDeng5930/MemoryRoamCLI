@@ -17,8 +17,29 @@ pub fn read_node<R: ReadRepository>(repository: &R, node_id: NodeId) -> KernelRe
 
     let node_line = render_node_line(repository, &node)?;
     let parent = load_related_node_line(repository, node.parent_id)?;
-    let prev_sibling = load_related_node_line(repository, node.prev_sibling_id)?;
-    let next_sibling = load_related_node_line(repository, node.next_sibling_id)?;
+    let (prev_sibling_id, next_sibling_id) = if repository.is_root_node(node_id)? {
+        find_top_level_neighbors(
+            repository
+                .list_root_nodes()?
+                .into_iter()
+                .map(|node| node.id)
+                .collect(),
+            node_id,
+        )?
+    } else if repository.is_daily_note_node(node_id)? {
+        find_top_level_neighbors(
+            repository
+                .list_daily_notes()?
+                .into_iter()
+                .map(|record| record.node_id)
+                .collect(),
+            node_id,
+        )?
+    } else {
+        (node.prev_sibling_id, node.next_sibling_id)
+    };
+    let prev_sibling = load_related_node_line(repository, prev_sibling_id)?;
+    let next_sibling = load_related_node_line(repository, next_sibling_id)?;
     let children = repository
         .list_children(Some(node_id))?
         .iter()
@@ -113,6 +134,21 @@ fn render_node_line<R: ReadRepository>(
     })
 }
 
+fn find_top_level_neighbors(
+    node_ids: Vec<NodeId>,
+    current_id: NodeId,
+) -> KernelResult<(Option<NodeId>, Option<NodeId>)> {
+    let current_index = node_ids
+        .iter()
+        .position(|node_id| *node_id == current_id)
+        .ok_or(KernelError::StorageCorruption(format!(
+            "missing top-level node {current_id}"
+        )))?;
+    let prev = current_index.checked_sub(1).map(|index| node_ids[index]);
+    let next = node_ids.get(current_index + 1).copied();
+    Ok((prev, next))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -128,6 +164,7 @@ mod tests {
         nodes: BTreeMap<NodeId, StoredNode>,
         aliases: BTreeMap<NodeId, Vec<AliasText>>,
         incoming_links: BTreeMap<NodeId, Vec<IncomingLinkRecord>>,
+        root_nodes: Vec<NodeId>,
     }
 
     impl FakeRepository {
@@ -136,6 +173,7 @@ mod tests {
                 nodes: nodes.into_iter().map(|node| (node.id, node)).collect(),
                 aliases: BTreeMap::new(),
                 incoming_links: BTreeMap::new(),
+                root_nodes: Vec::new(),
             }
         }
     }
@@ -208,15 +246,14 @@ mod tests {
         }
 
         fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> {
-            Ok(false)
+            Ok(self.root_nodes.contains(&_node_id))
         }
 
         fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
             Ok(self
-                .nodes
-                .values()
-                .filter(|node| node.parent_id.is_none())
-                .cloned()
+                .root_nodes
+                .iter()
+                .filter_map(|node_id| self.nodes.get(node_id).cloned())
                 .collect())
         }
 
@@ -293,6 +330,58 @@ mod tests {
         assert_eq!(
             view.incoming_links[0].source.rendered_content,
             "Source {{1::>Current}}"
+        );
+    }
+
+    #[test]
+    fn read_node_uses_top_level_neighbors_for_root_nodes() {
+        let first_id = NodeId::new(1).expect("valid test id");
+        let current_id = NodeId::new(2).expect("valid test id");
+        let next_id = NodeId::new(3).expect("valid test id");
+
+        let first = StoredNode {
+            id: first_id,
+            content: ContentLine::parse("First").expect("valid content"),
+            parent_id: None,
+            first_child_id: None,
+            last_child_id: None,
+            prev_sibling_id: None,
+            next_sibling_id: None,
+        };
+        let current = StoredNode {
+            id: current_id,
+            content: ContentLine::parse("Current").expect("valid content"),
+            parent_id: None,
+            first_child_id: None,
+            last_child_id: None,
+            prev_sibling_id: None,
+            next_sibling_id: None,
+        };
+        let next = StoredNode {
+            id: next_id,
+            content: ContentLine::parse("Next").expect("valid content"),
+            parent_id: None,
+            first_child_id: None,
+            last_child_id: None,
+            prev_sibling_id: None,
+            next_sibling_id: None,
+        };
+
+        let mut repository = FakeRepository::new(vec![first, current, next]);
+        repository.root_nodes = vec![first_id, current_id, next_id];
+
+        let view = read_node(&repository, current_id).expect("read should succeed");
+        assert_eq!(
+            view.prev_sibling
+                .expect("prev should exist")
+                .rendered_content,
+            "First"
+        );
+        assert_eq!(
+            view.next_sibling
+                .expect("next should exist")
+                .rendered_content,
+            "Next"
         );
     }
 }
