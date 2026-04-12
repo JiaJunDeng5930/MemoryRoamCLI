@@ -884,6 +884,7 @@ impl WriteRepository for SqliteStore {
     fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId> {
         let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
         ensure_schema_initialized(&transaction)?;
+        validate_root_content(&node.content)?;
 
         let node_id = insert_top_level_node(&transaction, node)?;
         let next_sort_order = transaction
@@ -2389,16 +2390,7 @@ fn normalize_node_for_root_promotion(
     })?;
     let normalized_content = ContentLine::parse(node.content.as_str().trim())
         .map_err(|error| KernelError::Input(error.to_string()))?;
-    let fragments = memoryroam_domain::parse_content(&normalized_content)
-        .map_err(|error| KernelError::Input(error.to_string()))?;
-    if fragments
-        .iter()
-        .any(|fragment| matches!(fragment, memoryroam_domain::ContentFragment::Link(_)))
-    {
-        return Err(KernelError::Input(String::from(
-            "root content cannot contain links",
-        )));
-    }
+    validate_root_content(&normalized_content)?;
     let normalized_lookup_key = LookupKey::new(normalized_content.as_str().to_owned())
         .map_err(|error| KernelError::Input(error.to_string()))?;
     transaction
@@ -2415,6 +2407,22 @@ fn normalize_node_for_root_promotion(
         )
         .map_err(map_sqlite_error)?;
     Ok(())
+}
+
+fn validate_root_content(content: &ContentLine) -> KernelResult<()> {
+    let fragments = memoryroam_domain::parse_content(content)
+        .map_err(|error| KernelError::Input(error.to_string()))?;
+    if fragments
+        .iter()
+        .any(|fragment| matches!(fragment, memoryroam_domain::ContentFragment::Link(_)))
+    {
+        return Err(KernelError::Input(String::from(
+            "root content cannot contain links",
+        )));
+    }
+    LookupKey::new(content.as_str().to_owned())
+        .map(|_| ())
+        .map_err(|error| KernelError::Input(error.to_string()))
 }
 
 fn register_top_level_nodes(
@@ -2886,6 +2894,23 @@ mod tests {
 
         let error = move_node(&mut store, linked_id, Placement::TopLevelLast)
             .expect_err("invalid root promotion should fail");
+        assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn create_root_node_rejects_link_bearing_content() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+
+        let bad_root = NewNodeRecord {
+            content: ContentLine::parse("Ref {{1}}").expect("content should parse"),
+            lookup_key: LookupKey::new(String::from("bad-root")).expect("lookup key should parse"),
+            outgoing_links: Vec::new(),
+            aliases: Vec::new(),
+        };
+        let error = store
+            .create_root_node(&bad_root)
+            .expect_err("invalid root should fail");
         assert!(matches!(error, KernelError::Input(_)));
     }
 
