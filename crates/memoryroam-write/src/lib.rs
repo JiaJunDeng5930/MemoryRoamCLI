@@ -57,21 +57,7 @@ pub fn update_node<R: WriteRepository>(
 ) -> KernelResult<()> {
     let raw_line =
         ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
-    if repository.is_daily_note_node(node_id)? {
-        return Err(KernelError::Constraint(String::from(
-            "daily note date nodes are immutable",
-        )));
-    }
-    if repository.is_root_node(node_id)? {
-        ensure_plain_text_root(&raw_line)?;
-        if let Some(existing_root) = repository.find_root_node_by_content(&raw_line)?
-            && existing_root.id != node_id
-        {
-            return Err(KernelError::Constraint(String::from(
-                "root lookup keys must stay unique",
-            )));
-        }
-    }
+    validate_root_update(repository, node_id, &raw_line)?;
 
     let CanonicalizedContent {
         content,
@@ -106,6 +92,7 @@ pub fn update_nodes<R: WriteRepository>(
 
     let mut canonical_updates = Vec::with_capacity(updates.len());
     let mut seen_node_ids = BTreeSet::new();
+    let mut seen_root_lookup_keys = BTreeSet::new();
 
     for (node_id, raw_content) in updates {
         if !seen_node_ids.insert(*node_id) {
@@ -122,6 +109,14 @@ pub fn update_nodes<R: WriteRepository>(
 
         let content = ContentLine::parse(raw_content.clone())
             .map_err(|error| KernelError::Input(error.to_string()))?;
+        let root_lookup_key = validate_root_update(repository, *node_id, &content)?;
+        if let Some(root_lookup_key) = root_lookup_key
+            && !seen_root_lookup_keys.insert(root_lookup_key)
+        {
+            return Err(KernelError::Constraint(String::from(
+                "root lookup keys must stay unique",
+            )));
+        }
         let CanonicalizedContent {
             content,
             lookup_key,
@@ -252,6 +247,32 @@ pub fn remove_alias<R: WriteRepository>(
 /// Builds a normalized lookup key from raw user input.
 pub fn create_lookup_key(raw_value: &str) -> KernelResult<LookupKey> {
     LookupKey::new(raw_value.to_owned()).map_err(|error| KernelError::Input(error.to_string()))
+}
+
+fn validate_root_update<R: WriteRepository>(
+    repository: &R,
+    node_id: NodeId,
+    raw_line: &ContentLine,
+) -> KernelResult<Option<String>> {
+    if repository.is_daily_note_node(node_id)? {
+        return Err(KernelError::Constraint(String::from(
+            "daily note date nodes are immutable",
+        )));
+    }
+    if !repository.is_root_node(node_id)? {
+        return Ok(None);
+    }
+
+    ensure_plain_text_root(raw_line)?;
+    if let Some(existing_root) = repository.find_root_node_by_content(raw_line)?
+        && existing_root.id != node_id
+    {
+        return Err(KernelError::Constraint(String::from(
+            "root lookup keys must stay unique",
+        )));
+    }
+
+    Ok(Some(raw_line.as_str().trim().to_owned()))
 }
 
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
@@ -674,6 +695,28 @@ mod tests {
 
         let error = update_node(&mut repository, root_id, "Ref {{Target}}")
             .expect_err("update should fail");
+        assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn update_nodes_rejects_link_bearing_root_content() {
+        let mut repository = FakeRepository::default();
+        let root_id = NodeId::new(1).expect("valid test id");
+        let target_id = NodeId::new(2).expect("valid test id");
+        repository.existing.insert(root_id, stored_node(1, "Root"));
+        repository
+            .existing
+            .insert(target_id, stored_node(2, "Target"));
+        repository.root_nodes.insert(root_id);
+        repository
+            .aliases
+            .insert(String::from("Target"), vec![target_id]);
+
+        let error = update_nodes(
+            &mut repository,
+            &[(root_id, String::from("Ref {{Target}}"))],
+        )
+        .expect_err("batch update should fail");
         assert!(matches!(error, KernelError::Input(_)));
     }
 }
