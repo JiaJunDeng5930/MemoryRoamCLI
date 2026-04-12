@@ -14,7 +14,8 @@ use memoryroam_domain::{
 };
 use rusqlite::types::Type;
 use rusqlite::{
-    Connection, ErrorCode, OpenFlags, OptionalExtension, Params, Row, Transaction, params,
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Params, Row, Transaction,
+    TransactionBehavior, params,
 };
 
 const SCHEMA: &str = r#"
@@ -943,7 +944,10 @@ impl WriteRepository for SqliteStore {
         note_date: &str,
         node: &NewNodeRecord,
     ) -> KernelResult<NodeId> {
-        let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
         ensure_schema_initialized(&transaction)?;
 
         let note_node_id = match find_daily_note_from_handle(&transaction, note_date)? {
@@ -1235,9 +1239,19 @@ impl ReadRepository for BatchCreateRepository<'_> {
     }
 
     fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+        let mut candidates = TransactionRepository {
+            transaction: self.transaction,
+        }
+        .lookup_candidates(key)?;
+
         if let Some(node_ids) = self.preferred_candidates.get(key) {
-            let mut candidates = Vec::with_capacity(node_ids.len());
             for node_id in node_ids {
+                if candidates
+                    .iter()
+                    .any(|candidate| candidate.node_id == *node_id)
+                {
+                    continue;
+                }
                 let node = fetch_node(self.transaction, *node_id)?.ok_or(
                     KernelError::StorageCorruption(format!("missing batch-created node {node_id}")),
                 )?;
@@ -1247,13 +1261,10 @@ impl ReadRepository for BatchCreateRepository<'_> {
                     path: self.node_path(*node_id)?,
                 });
             }
-            return Ok(candidates);
         }
 
-        TransactionRepository {
-            transaction: self.transaction,
-        }
-        .lookup_candidates(key)
+        candidates.sort_by_key(|candidate| candidate.node_id);
+        Ok(candidates)
     }
 
     fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
@@ -2707,6 +2718,27 @@ mod tests {
         );
         let incoming = read_node(&store, root_id).expect("read should succeed");
         assert_eq!(incoming.incoming_links.len(), 1);
+    }
+
+    #[test]
+    fn batch_create_keeps_existing_lookup_candidates_visible() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root node should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+
+        let error = create_nodes(
+            &mut store,
+            "Topic\nSee {{Topic}}",
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect_err("ambiguous lookup should fail");
+        assert!(matches!(error, KernelError::LookupAmbiguous { .. }));
     }
 
     #[test]
