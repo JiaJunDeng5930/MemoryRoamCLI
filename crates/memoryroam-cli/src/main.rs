@@ -33,6 +33,7 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct NoteCommand {
+    #[arg(allow_hyphen_values = true)]
     content: Option<String>,
 }
 
@@ -55,11 +56,13 @@ struct RootCommand {
 #[derive(Debug, Subcommand)]
 enum RootSubcommand {
     Create {
+        #[arg(allow_hyphen_values = true)]
         content: Option<String>,
     },
     Apply {
         root_id: i64,
         #[arg(long)]
+        #[arg(allow_hyphen_values = true)]
         text: Option<String>,
         #[arg(long)]
         node: Vec<i64>,
