@@ -73,7 +73,26 @@ fn cli_empty_today_hint_preserves_selected_database() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "use: memoryroam --db {} note \"...\"",
+            "use: memoryroam --db '{}' note \"...\"",
+            database_path.display()
+        )));
+}
+
+#[test]
+fn cli_empty_today_hint_quotes_database_paths_with_spaces() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let database_path = temp_dir.path().join("notes with spaces.sqlite3");
+
+    let mut init = Command::cargo_bin("memoryroam").expect("binary should build");
+    init.arg("--db").arg(&database_path).arg("init");
+    init.assert().success();
+
+    let mut day = Command::cargo_bin("memoryroam").expect("binary should build");
+    day.arg("--db").arg(&database_path).arg("day");
+    day.assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "use: memoryroam --db '{}' note \"...\"",
             database_path.display()
         )));
 }
