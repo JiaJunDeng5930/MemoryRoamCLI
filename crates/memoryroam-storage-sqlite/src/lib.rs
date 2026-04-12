@@ -495,7 +495,7 @@ impl ReadRepository for SqliteStore {
                     })?;
                 follow_chain(&self.connection, parent.first_child_id)
             }
-            None => list_root_nodes_from_handle(&self.connection),
+            None => list_top_level_nodes_from_handle(&self.connection),
         }
     }
 
@@ -1072,7 +1072,7 @@ impl ReadRepository for TransactionRepository<'_> {
                     })?;
                 follow_chain(self.transaction, parent.first_child_id)
             }
-            None => list_root_nodes_from_handle(self.transaction),
+            None => list_top_level_nodes_from_handle(self.transaction),
         }
     }
 
@@ -1250,7 +1250,7 @@ impl ReadRepository for BatchCreateRepository<'_> {
                     })?;
                 follow_chain(self.transaction, parent.first_child_id)
             }
-            None => list_root_nodes_from_handle(self.transaction),
+            None => list_top_level_nodes_from_handle(self.transaction),
         }
     }
 
@@ -1610,6 +1610,35 @@ fn is_root_node_in_handle(handle: &impl SqlHandle, node_id: NodeId) -> KernelRes
         )
         .map(|exists| exists == 1)
         .map_err(map_sqlite_error)
+}
+
+fn list_top_level_nodes_from_handle(handle: &impl SqlHandle) -> KernelResult<Vec<StoredNode>> {
+    let mut statement = handle
+        .prepare(
+            "SELECT n.id
+             FROM nodes AS n
+             LEFT JOIN root_nodes AS r
+               ON r.node_id = n.id
+             LEFT JOIN daily_notes AS d
+               ON d.node_id = n.id
+             WHERE n.parent_id IS NULL
+               AND (r.node_id IS NOT NULL OR d.node_id IS NOT NULL)
+             ORDER BY n.id",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| node_id_from_row(row, 0))
+        .map_err(map_sqlite_error)?;
+
+    let mut nodes = Vec::new();
+    for row in rows {
+        let node_id = row.map_err(map_sqlite_error)?;
+        let node = fetch_node(handle, node_id)?.ok_or(KernelError::StorageCorruption(format!(
+            "missing top-level node {node_id}"
+        )))?;
+        nodes.push(node);
+    }
+    Ok(nodes)
 }
 
 fn list_root_nodes_from_handle(handle: &impl SqlHandle) -> KernelResult<Vec<StoredNode>> {
@@ -2404,6 +2433,26 @@ mod tests {
                 .expect("daily notes should load")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn list_children_none_returns_all_top_level_nodes() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+
+        let root_id = store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root node should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+
+        let top_level = store
+            .list_children(None)
+            .expect("top-level list should load");
+        let top_level_ids = top_level.iter().map(|node| node.id).collect::<Vec<_>>();
+
+        assert_eq!(top_level_ids, vec![root_id, day_node_id]);
     }
 
     #[test]
