@@ -448,11 +448,19 @@ impl<R: WriteRepository> ReadRepository for PendingUpdateRepository<'_, R> {
             .base
             .lookup_candidates(key)?
             .into_iter()
-            .filter(|candidate| !self.pending_updates.contains_key(&candidate.node_id))
+            .map(|mut candidate| {
+                if let Some(update) = self.pending_updates.get(&candidate.node_id) {
+                    candidate.content = update.content.clone();
+                }
+                candidate
+            })
             .collect::<Vec<_>>();
 
         for (node_id, update) in self.pending_updates {
-            if update.lookup_key.as_str() == key.as_str() {
+            let already_present = candidates
+                .iter()
+                .any(|candidate| candidate.node_id == *node_id);
+            if !already_present && update.lookup_key.as_str() == key.as_str() {
                 candidates.push(memoryroam_domain::LookupCandidate {
                     node_id: *node_id,
                     content: update.content.clone(),
@@ -1018,6 +1026,35 @@ mod tests {
         assert_eq!(repository.updated.len(), 2);
         assert_eq!(repository.updated[0].1.as_str(), "Beta");
         assert_eq!(repository.updated[1].1.as_str(), "See {{1::Beta}}");
+    }
+
+    #[test]
+    fn update_nodes_keep_existing_aliases_visible_for_pending_nodes() {
+        let mut repository = FakeRepository::default();
+        let aliased_id = NodeId::new(1).expect("valid test id");
+        let dependent_id = NodeId::new(2).expect("valid test id");
+        repository
+            .existing
+            .insert(aliased_id, stored_node(1, "Old"));
+        repository
+            .existing
+            .insert(dependent_id, stored_node(2, "See {{topic}}"));
+        repository
+            .aliases
+            .insert(String::from("topic"), vec![aliased_id]);
+
+        update_nodes(
+            &mut repository,
+            &[
+                (aliased_id, String::from("New")),
+                (dependent_id, String::from("See {{topic}}")),
+            ],
+        )
+        .expect("batch update should preserve alias lookups");
+
+        assert_eq!(repository.updated.len(), 2);
+        assert_eq!(repository.updated[0].1.as_str(), "New");
+        assert_eq!(repository.updated[1].1.as_str(), "See {{1::topic}}");
     }
 
     #[test]

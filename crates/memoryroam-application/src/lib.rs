@@ -644,7 +644,7 @@ fn ensure_referenceable_root_text(content: &ContentLine) -> KernelResult<()> {
 
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     let fragments =
-        parse_content(content).map_err(|error| KernelError::Storage(error.to_string()))?;
+        parse_content(content).map_err(|error| KernelError::Input(error.to_string()))?;
     if fragments
         .iter()
         .any(|fragment| matches!(fragment, ContentFragment::Link(_)))
@@ -1031,6 +1031,15 @@ mod tests {
 
         let error =
             create_root(&mut store, "foo}}bar").expect_err("raw closing braces should be rejected");
+        assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn create_root_reports_malformed_link_prefix_as_input_error() {
+        let mut store = store();
+
+        let error =
+            create_root(&mut store, "Broken {{oops").expect_err("malformed root should fail");
         assert!(matches!(error, KernelError::Input(_)));
     }
 
