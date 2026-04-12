@@ -250,17 +250,18 @@ pub fn read_node_context<R: ReadRepository>(
     let soft_limit = budget_target.saturating_add(300);
     let mut used_tokens = current_tokens;
 
-    let (prev_candidates, next_candidates) =
-        if repository.is_daily_note_node(node_id)? || repository.is_root_node(node_id)? {
-            top_level_neighbors(repository, node_id)?
-        } else if node.parent_id.is_some() {
-            (
-                collect_previous_siblings(repository, &node)?,
-                collect_next_siblings(repository, &node)?,
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
+    let (prev_candidates, next_candidates) = if repository.is_daily_note_node(node_id)? {
+        daily_note_neighbors(repository, node_id)?
+    } else if repository.is_root_node(node_id)? {
+        root_neighbors(repository, node_id)?
+    } else if node.parent_id.is_some() {
+        (
+            collect_previous_siblings(repository, &node)?,
+            collect_next_siblings(repository, &node)?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let sibling_selection = choose_siblings(
         repository,
@@ -426,24 +427,58 @@ fn collect_next_siblings<R: ReadRepository>(
     Ok(siblings)
 }
 
-fn top_level_neighbors<R: ReadRepository>(
+fn daily_note_neighbors<R: ReadRepository>(
     repository: &R,
     node_id: NodeId,
 ) -> KernelResult<(Vec<StoredNode>, Vec<StoredNode>)> {
-    let top_level_nodes = repository.list_children(None)?;
-    let current_index = top_level_nodes
+    let daily_notes = repository.list_daily_notes()?;
+    let current_index = daily_notes
+        .iter()
+        .position(|record| record.node_id == node_id)
+        .ok_or(KernelError::StorageCorruption(format!(
+            "missing daily note membership for node {node_id}"
+        )))?;
+
+    let previous = daily_notes[..current_index]
+        .iter()
+        .rev()
+        .map(|record| {
+            repository
+                .get_node(record.node_id)?
+                .ok_or(KernelError::StorageCorruption(format!(
+                    "missing daily note node {}",
+                    record.node_id
+                )))
+        })
+        .collect::<KernelResult<Vec<_>>>()?;
+    let next = daily_notes[current_index + 1..]
+        .iter()
+        .map(|record| {
+            repository
+                .get_node(record.node_id)?
+                .ok_or(KernelError::StorageCorruption(format!(
+                    "missing daily note node {}",
+                    record.node_id
+                )))
+        })
+        .collect::<KernelResult<Vec<_>>>()?;
+    Ok((previous, next))
+}
+
+fn root_neighbors<R: ReadRepository>(
+    repository: &R,
+    node_id: NodeId,
+) -> KernelResult<(Vec<StoredNode>, Vec<StoredNode>)> {
+    let root_nodes = repository.list_root_nodes()?;
+    let current_index = root_nodes
         .iter()
         .position(|node| node.id == node_id)
         .ok_or(KernelError::StorageCorruption(format!(
             "missing root membership for node {node_id}"
         )))?;
 
-    let previous = top_level_nodes[..current_index]
-        .iter()
-        .rev()
-        .cloned()
-        .collect();
-    let next = top_level_nodes[current_index + 1..].to_vec();
+    let previous = root_nodes[..current_index].iter().rev().cloned().collect();
+    let next = root_nodes[current_index + 1..].to_vec();
     Ok((previous, next))
 }
 
@@ -770,6 +805,22 @@ mod tests {
         assert_eq!(view.prev_siblings[0].id, first.root.id);
         assert_eq!(view.next_siblings.len(), 1);
         assert_eq!(view.next_siblings[0].id, next.root.id);
+    }
+
+    #[test]
+    fn read_root_ignores_daily_notes_when_picking_neighbors() {
+        let mut store = store();
+
+        let first = create_root(&mut store, "Alpha").expect("first root should be created");
+        let current = create_root(&mut store, "Beta").expect("current root should be created");
+        store
+            .create_daily_note_node("2026-04-12")
+            .expect("daily note should be created");
+
+        let view = read_node_context(&store, current.root.id, 5500).expect("read should succeed");
+        assert_eq!(view.prev_siblings.len(), 1);
+        assert_eq!(view.prev_siblings[0].id, first.root.id);
+        assert!(view.next_siblings.is_empty());
     }
 
     #[test]
