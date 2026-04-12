@@ -184,7 +184,9 @@ fn print_day_view(view: &DayView) {
     println!();
     if view.entries.is_empty() {
         println!("empty");
-        println!("use: memoryroam note \"...\"");
+        if view.note_date == today_date() {
+            println!("use: memoryroam note \"...\"");
+        }
         return;
     }
 

@@ -185,6 +185,20 @@ fn cli_day_rejects_invalid_dates() {
 }
 
 #[test]
+fn cli_empty_historical_day_does_not_suggest_note_command() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+
+    command(&temp_dir).arg("init").assert().success();
+
+    command(&temp_dir)
+        .args(["day", "2026-04-11"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("empty"))
+        .stdout(predicate::str::contains("use: memoryroam note").not());
+}
+
+#[test]
 fn cli_accepts_text_arguments_that_start_with_a_dash() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
 

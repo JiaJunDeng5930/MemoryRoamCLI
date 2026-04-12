@@ -155,7 +155,7 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     };
 
     let root_line = render_node_line(repository, &root)?;
-    let search_text = root.content.as_str();
+    let search_text = normalized_root_lookup_text(&root.content);
     let mut matches = repository
         .search_text_matches(search_text)?
         .into_iter()
@@ -598,6 +598,10 @@ fn validate_day_date(note_date: &str, error_message: &str) -> KernelResult<()> {
         .map_err(|_| KernelError::Input(String::from(error_message)))
 }
 
+fn normalized_root_lookup_text(content: &ContentLine) -> &str {
+    content.as_str().trim()
+}
+
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     let fragments =
         parse_content(content).map_err(|error| KernelError::Storage(error.to_string()))?;
@@ -710,8 +714,8 @@ mod tests {
             .create_nodes(Placement::LastChildOf(day_node), &[note])
             .expect("note should be created");
 
-        let first = create_root(&mut store, "Topic").expect("first root should succeed");
-        let second = create_root(&mut store, " Topic ").expect("second root should succeed");
+        let first = create_root(&mut store, " Topic ").expect("first root should succeed");
+        let second = create_root(&mut store, "Topic").expect("second root should succeed");
 
         assert_eq!(first.root.id, second.root.id);
         assert_eq!(first.matches, second.matches);
