@@ -1743,15 +1743,6 @@ fn validate_placement_target(
     placement: Placement,
     moving_node_id: Option<NodeId>,
 ) -> KernelResult<()> {
-    if matches!(
-        placement,
-        Placement::TopLevelFirst | Placement::TopLevelLast
-    ) {
-        return Err(KernelError::Input(String::from(
-            "top-level placement is not supported",
-        )));
-    }
-
     if let Some(target_id) = placement.target_id() {
         ensure_node_exists_in_db(handle, target_id)?;
         if Some(target_id) == moving_node_id {
@@ -1796,6 +1787,17 @@ fn is_in_subtree(
 }
 
 fn detach_node(transaction: &Transaction<'_>, node: &StoredNode) -> KernelResult<()> {
+    if node.parent_id.is_none() {
+        if !is_root_node_in_handle(transaction, node.id)? {
+            return Err(KernelError::Constraint(format!(
+                "top-level node {} cannot be detached",
+                node.id
+            )));
+        }
+        remove_top_level_nodes(transaction, &[node.id])?;
+        return Ok(());
+    }
+
     let parent_id = node.parent_id.ok_or(KernelError::Constraint(format!(
         "top-level node {} cannot be detached",
         node.id
@@ -1868,15 +1870,28 @@ fn attach_chain(
 ) -> KernelResult<()> {
     match placement {
         Placement::TopLevelFirst | Placement::TopLevelLast => {
-            return Err(KernelError::Input(String::from(
-                "top-level placement is not supported",
-            )));
+            register_top_level_chain(transaction, first_id, last_id, placement)?;
         }
         Placement::Before(target_id) => {
             let target = fetch_node(transaction, target_id)?.ok_or(KernelError::NotFound {
                 entity: "node",
                 id: target_id,
             })?;
+            if target.parent_id.is_none() {
+                if !is_root_node_in_handle(transaction, target_id)? {
+                    return Err(KernelError::Constraint(format!(
+                        "top-level node {target_id} cannot participate in sibling placement"
+                    )));
+                }
+                register_top_level_chain_around_target(
+                    transaction,
+                    first_id,
+                    last_id,
+                    target_id,
+                    true,
+                )?;
+                return Ok(());
+            }
             let target_parent_id = target.parent_id.ok_or(KernelError::Constraint(format!(
                 "top-level node {target_id} cannot participate in sibling placement"
             )))?;
@@ -1933,6 +1948,21 @@ fn attach_chain(
                 entity: "node",
                 id: target_id,
             })?;
+            if target.parent_id.is_none() {
+                if !is_root_node_in_handle(transaction, target_id)? {
+                    return Err(KernelError::Constraint(format!(
+                        "top-level node {target_id} cannot participate in sibling placement"
+                    )));
+                }
+                register_top_level_chain_around_target(
+                    transaction,
+                    first_id,
+                    last_id,
+                    target_id,
+                    false,
+                )?;
+                return Ok(());
+            }
             let target_parent_id = target.parent_id.ok_or(KernelError::Constraint(format!(
                 "top-level node {target_id} cannot participate in sibling placement"
             )))?;
@@ -2134,6 +2164,163 @@ fn set_container_bounds(
         )
         .map_err(map_sqlite_error)?;
     Ok(())
+}
+
+fn chain_node_ids(
+    transaction: &Transaction<'_>,
+    first_id: NodeId,
+    last_id: NodeId,
+) -> KernelResult<Vec<NodeId>> {
+    let mut node_ids = Vec::new();
+    let mut current = Some(first_id);
+    while let Some(node_id) = current {
+        node_ids.push(node_id);
+        if node_id == last_id {
+            break;
+        }
+        current = fetch_node(transaction, node_id)?
+            .ok_or(KernelError::StorageCorruption(format!(
+                "missing node {node_id} while reading chain"
+            )))?
+            .next_sibling_id;
+    }
+    Ok(node_ids)
+}
+
+fn max_root_sort_order(transaction: &Transaction<'_>) -> KernelResult<i64> {
+    transaction
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), 0)
+             FROM root_nodes",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(map_sqlite_error)
+}
+
+fn root_sort_order(transaction: &Transaction<'_>, node_id: NodeId) -> KernelResult<i64> {
+    transaction
+        .query_row(
+            "SELECT sort_order
+             FROM root_nodes
+             WHERE node_id = ?1",
+            params![node_id.value()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(map_sqlite_error)
+}
+
+fn shift_root_sort_orders_from(
+    transaction: &Transaction<'_>,
+    start_sort_order: i64,
+    delta: i64,
+) -> KernelResult<()> {
+    if delta == 0 {
+        return Ok(());
+    }
+    transaction
+        .execute(
+            "UPDATE root_nodes
+             SET sort_order = sort_order + ?1
+             WHERE sort_order >= ?2",
+            params![delta, start_sort_order],
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(())
+}
+
+fn remove_top_level_nodes(transaction: &Transaction<'_>, node_ids: &[NodeId]) -> KernelResult<()> {
+    let mut sort_orders = Vec::new();
+    for node_id in node_ids {
+        sort_orders.push(root_sort_order(transaction, *node_id)?);
+        transaction
+            .execute(
+                "DELETE FROM root_nodes WHERE node_id = ?1",
+                params![node_id.value()],
+            )
+            .map_err(map_sqlite_error)?;
+    }
+    sort_orders.sort_unstable();
+    for removed_sort_order in sort_orders {
+        transaction
+            .execute(
+                "UPDATE root_nodes
+                 SET sort_order = sort_order - 1
+                 WHERE sort_order > ?1",
+                params![removed_sort_order],
+            )
+            .map_err(map_sqlite_error)?;
+    }
+    Ok(())
+}
+
+fn register_top_level_nodes(
+    transaction: &Transaction<'_>,
+    node_ids: &[NodeId],
+    start_sort_order: i64,
+) -> KernelResult<()> {
+    if node_ids.is_empty() {
+        return Ok(());
+    }
+
+    shift_root_sort_orders_from(transaction, start_sort_order, node_ids.len() as i64)?;
+
+    for (index, node_id) in node_ids.iter().enumerate() {
+        transaction
+            .execute(
+                "UPDATE nodes
+                 SET parent_id = NULL,
+                     prev_sibling_id = NULL,
+                     next_sibling_id = NULL
+                 WHERE id = ?1",
+                params![node_id.value()],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction
+            .execute(
+                "INSERT INTO root_nodes (node_id, sort_order) VALUES (?1, ?2)",
+                params![node_id.value(), start_sort_order + index as i64],
+            )
+            .map_err(map_sqlite_error)?;
+    }
+
+    Ok(())
+}
+
+fn register_top_level_chain(
+    transaction: &Transaction<'_>,
+    first_id: NodeId,
+    last_id: NodeId,
+    placement: Placement,
+) -> KernelResult<()> {
+    let node_ids = chain_node_ids(transaction, first_id, last_id)?;
+    let start_sort_order = match placement {
+        Placement::TopLevelFirst => 1,
+        Placement::TopLevelLast => max_root_sort_order(transaction)? + 1,
+        _ => {
+            return Err(KernelError::Constraint(String::from(
+                "top-level registration requires a top-level placement",
+            )));
+        }
+    };
+    register_top_level_nodes(transaction, &node_ids, start_sort_order)
+}
+
+fn register_top_level_chain_around_target(
+    transaction: &Transaction<'_>,
+    first_id: NodeId,
+    last_id: NodeId,
+    target_id: NodeId,
+    before_target: bool,
+) -> KernelResult<()> {
+    let node_ids = chain_node_ids(transaction, first_id, last_id)?;
+    let target_sort_order = root_sort_order(transaction, target_id)?;
+    let start_sort_order = if before_target {
+        target_sort_order
+    } else {
+        target_sort_order + 1
+    };
+    register_top_level_nodes(transaction, &node_ids, start_sort_order)
 }
 
 fn find_incoming_link(
@@ -2502,21 +2689,19 @@ mod tests {
         let parent_id = store
             .create_daily_note_node("2026-04-11")
             .expect("first create should succeed");
-        create_nodes(&mut store, "Parent {{1}}", &[], Placement::TopLevelLast)
-            .expect_err("top-level placement should be rejected");
-        create_nodes(
+        let root_id = create_nodes(&mut store, "Parent", &[], Placement::TopLevelLast)
+            .expect("top-level placement should succeed")[0];
+        let child_id = create_nodes(
             &mut store,
-            "Child {{1}}",
+            &format!("Child {{{{{root_id}}}}}"),
             &[],
             Placement::LastChildOf(parent_id),
         )
-        .expect("child create should succeed");
+        .expect("child create should succeed")[0];
 
         assert_eq!(
-            store
-                .node_path(NodeId::new(parent_id.value() + 1).expect("valid id"))
-                .expect("path should load"),
-            "2026-04-11 > Child {{1::>2026-04-11}}"
+            store.node_path(child_id).expect("path should load"),
+            "2026-04-11 > Child {{2::>Parent}}"
         );
     }
 }
