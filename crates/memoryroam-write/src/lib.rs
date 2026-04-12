@@ -3,12 +3,12 @@
 #![warn(rustdoc::private_intra_doc_links)]
 #![doc = include_str!("../README.md")]
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use memoryroam_domain::{
     AliasText, CanonicalizedContent, ContentFragment, ContentLine, DeleteMode, KernelError,
-    KernelResult, LookupKey, NodeId, NodeUpdateRecord, Placement, WriteRepository,
-    canonicalize_content, parse_content,
+    KernelResult, LookupKey, NodeId, NodeUpdateRecord, Placement, ReadRepository, StoredNode,
+    WriteRepository, canonicalize_content, parse_content,
 };
 
 /// Initializes the target repository schema.
@@ -90,6 +90,7 @@ pub fn update_nodes<R: WriteRepository>(
     }
 
     let mut canonical_updates = Vec::with_capacity(updates.len());
+    let mut pending_updates = BTreeMap::new();
     let mut seen_node_ids = BTreeSet::new();
     let mut seen_root_lookup_keys = BTreeSet::new();
 
@@ -100,14 +101,13 @@ pub fn update_nodes<R: WriteRepository>(
             )));
         }
 
-        if repository.is_daily_note_node(*node_id)? {
-            return Err(KernelError::Constraint(String::from(
-                "daily note date nodes are immutable",
-            )));
-        }
+        let validation_repository = PendingUpdateRepository {
+            base: repository,
+            pending_updates: &pending_updates,
+        };
 
-        let content = prepare_updated_content(repository, *node_id, raw_content)?;
-        let root_lookup_key = validate_root_update(repository, *node_id, &content)?;
+        let content = prepare_updated_content(&validation_repository, *node_id, raw_content)?;
+        let root_lookup_key = validate_root_update(&validation_repository, *node_id, &content)?;
         if let Some(root_lookup_key) = root_lookup_key
             && !seen_root_lookup_keys.insert(root_lookup_key)
         {
@@ -119,7 +119,7 @@ pub fn update_nodes<R: WriteRepository>(
             content,
             lookup_key,
             outgoing_links,
-        } = canonicalize_content(repository, &content)?;
+        } = canonicalize_content(&validation_repository, &content)?;
 
         if outgoing_links.contains(node_id) {
             return Err(KernelError::Constraint(format!(
@@ -127,20 +127,29 @@ pub fn update_nodes<R: WriteRepository>(
             )));
         }
 
-        ensure_no_link_cycle(repository, *node_id, &outgoing_links)?;
-
-        canonical_updates.push(NodeUpdateRecord {
+        let update = NodeUpdateRecord {
             node_id: *node_id,
             content,
             lookup_key,
             outgoing_links,
-        });
+        };
+
+        let mut trial_updates = pending_updates.clone();
+        trial_updates.insert(*node_id, update.clone());
+        let cycle_repository = PendingUpdateRepository {
+            base: repository,
+            pending_updates: &trial_updates,
+        };
+        ensure_no_link_cycle(&cycle_repository, *node_id, &update.outgoing_links)?;
+
+        pending_updates = trial_updates;
+        canonical_updates.push(update);
     }
 
     repository.update_node_contents(&canonical_updates)
 }
 
-fn ensure_no_link_cycle<R: WriteRepository>(
+fn ensure_no_link_cycle<R: ReadRepository>(
     repository: &R,
     node_id: NodeId,
     outgoing_links: &[NodeId],
@@ -247,7 +256,7 @@ pub fn create_lookup_key(raw_value: &str) -> KernelResult<LookupKey> {
     LookupKey::new(raw_value.to_owned()).map_err(|error| KernelError::Input(error.to_string()))
 }
 
-fn validate_root_update<R: WriteRepository>(
+fn validate_root_update<R: ReadRepository>(
     repository: &R,
     node_id: NodeId,
     raw_line: &ContentLine,
@@ -277,7 +286,7 @@ fn validate_root_update<R: WriteRepository>(
     Ok(Some(normalized.to_owned()))
 }
 
-fn prepare_updated_content<R: WriteRepository>(
+fn prepare_updated_content<R: ReadRepository>(
     repository: &R,
     node_id: NodeId,
     raw_content: &str,
@@ -314,6 +323,144 @@ fn ensure_safe_root_label_text(text: &str) -> KernelResult<()> {
 
 fn normalize_root_content(raw_content: &str) -> KernelResult<ContentLine> {
     ContentLine::parse(raw_content.trim()).map_err(|error| KernelError::Input(error.to_string()))
+}
+
+struct PendingUpdateRepository<'a, R> {
+    base: &'a R,
+    pending_updates: &'a BTreeMap<NodeId, NodeUpdateRecord>,
+}
+
+impl<R: WriteRepository> ReadRepository for PendingUpdateRepository<'_, R> {
+    fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+        let Some(mut node) = self.base.get_node(node_id)? else {
+            return Ok(None);
+        };
+        if let Some(update) = self.pending_updates.get(&node_id) {
+            node.content = update.content.clone();
+        }
+        Ok(Some(node))
+    }
+
+    fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+        self.base
+            .list_children(parent_id)?
+            .into_iter()
+            .map(|node| {
+                self.get_node(node.id)?
+                    .ok_or(KernelError::StorageCorruption(format!(
+                        "missing pending child node {}",
+                        node.id
+                    )))
+            })
+            .collect()
+    }
+
+    fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+        if let Some(update) = self.pending_updates.get(&node_id) {
+            return Ok(update.outgoing_links.clone());
+        }
+
+        self.base.list_outgoing_links(node_id)
+    }
+
+    fn list_incoming_links(
+        &self,
+        node_id: NodeId,
+    ) -> KernelResult<Vec<memoryroam_domain::IncomingLinkRecord>> {
+        self.base.list_incoming_links(node_id)
+    }
+
+    fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+        self.base.list_aliases(node_id)
+    }
+
+    fn fetch_node_contents(
+        &self,
+        node_ids: &BTreeSet<NodeId>,
+    ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+        let mut contents = self.base.fetch_node_contents(node_ids)?;
+        for node_id in node_ids {
+            if let Some(update) = self.pending_updates.get(node_id) {
+                contents.insert(*node_id, update.content.clone());
+            }
+        }
+        Ok(contents)
+    }
+
+    fn lookup_candidates(
+        &self,
+        key: &LookupKey,
+    ) -> KernelResult<Vec<memoryroam_domain::LookupCandidate>> {
+        let mut candidates = self
+            .base
+            .lookup_candidates(key)?
+            .into_iter()
+            .filter(|candidate| !self.pending_updates.contains_key(&candidate.node_id))
+            .collect::<Vec<_>>();
+
+        for (node_id, update) in self.pending_updates {
+            if update.lookup_key.as_str() == key.as_str() {
+                candidates.push(memoryroam_domain::LookupCandidate {
+                    node_id: *node_id,
+                    content: update.content.clone(),
+                    path: self.node_path(*node_id)?,
+                });
+            }
+        }
+
+        candidates.sort_by_key(|candidate| candidate.node_id);
+        Ok(candidates)
+    }
+
+    fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+        self.base.node_path(node_id)
+    }
+
+    fn find_daily_note(
+        &self,
+        note_date: &str,
+    ) -> KernelResult<Option<memoryroam_domain::DailyNoteRecord>> {
+        self.base.find_daily_note(note_date)
+    }
+
+    fn list_daily_notes(&self) -> KernelResult<Vec<memoryroam_domain::DailyNoteRecord>> {
+        self.base.list_daily_notes()
+    }
+
+    fn is_daily_note_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        self.base.is_daily_note_node(node_id)
+    }
+
+    fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+        self.base.is_root_node(node_id)
+    }
+
+    fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+        self.base
+            .list_root_nodes()?
+            .into_iter()
+            .map(|node| {
+                self.get_node(node.id)?
+                    .ok_or(KernelError::StorageCorruption(format!(
+                        "missing pending root node {}",
+                        node.id
+                    )))
+            })
+            .collect()
+    }
+
+    fn find_root_node_by_content(&self, content: &ContentLine) -> KernelResult<Option<StoredNode>> {
+        let normalized = content.as_str().trim();
+        let matching_root = self
+            .list_root_nodes()?
+            .into_iter()
+            .find(|root| root.content.as_str().trim() == normalized);
+        Ok(matching_root)
+    }
+
+    fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+        self.base.search_text_matches(needle)
+    }
 }
 
 #[cfg(test)]
@@ -375,7 +522,14 @@ mod tests {
         }
 
         fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
-            let ids = self.aliases.get(key.as_str()).cloned().unwrap_or_default();
+            let mut ids = self.aliases.get(key.as_str()).cloned().unwrap_or_default();
+            for (node_id, node) in &self.existing {
+                if node.content.as_str().trim() == key.as_str() {
+                    ids.push(*node_id);
+                }
+            }
+            ids.sort();
+            ids.dedup();
             Ok(ids
                 .into_iter()
                 .map(|node_id| LookupCandidate {
@@ -766,5 +920,31 @@ mod tests {
         )
         .expect_err("batch update should fail");
         assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn update_nodes_can_reference_earlier_renames_in_the_same_batch() {
+        let mut repository = FakeRepository::default();
+        let renamed_id = NodeId::new(1).expect("valid test id");
+        let dependent_id = NodeId::new(2).expect("valid test id");
+        repository
+            .existing
+            .insert(renamed_id, stored_node(1, "Alpha"));
+        repository
+            .existing
+            .insert(dependent_id, stored_node(2, "See {{Alpha}}"));
+
+        update_nodes(
+            &mut repository,
+            &[
+                (renamed_id, String::from("Beta")),
+                (dependent_id, String::from("See {{Beta}}")),
+            ],
+        )
+        .expect("batch update should succeed");
+
+        assert_eq!(repository.updated.len(), 2);
+        assert_eq!(repository.updated[0].1.as_str(), "Beta");
+        assert_eq!(repository.updated[1].1.as_str(), "See {{1::Beta}}");
     }
 }
