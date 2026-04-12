@@ -130,6 +130,7 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
 ) -> KernelResult<RootCreateResult> {
     let content =
         ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
+    ensure_plain_text_root(&content)?;
     let root = match repository.find_root_node_by_content(&content)? {
         Some(node) => node,
         None => {
@@ -144,12 +145,13 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     };
 
     let root_line = render_node_line(repository, &root)?;
+    let search_text = root.content.as_str().trim();
     let mut matches = repository
-        .search_text_matches(content.as_str())?
+        .search_text_matches(search_text)?
         .into_iter()
-        .filter(|node| plain_text_contains(&node.content, content.as_str()).unwrap_or(false))
+        .filter(|node| plain_text_contains(&node.content, search_text).unwrap_or(false))
         .collect::<Vec<_>>();
-    matches.sort_by(|left, right| compare_match_order(left, right, content.as_str()));
+    matches.sort_by(|left, right| compare_match_order(left, right, search_text));
 
     let hidden_match_count = matches.len().saturating_sub(DEFAULT_MATCH_LIMIT);
     let matches = matches
@@ -181,7 +183,11 @@ pub fn apply_root_link<R: ReadRepository + memoryroam_domain::WriteRepository>(
         )));
     }
 
-    let target_text = target_text.unwrap_or(root.content.as_str());
+    if target_text.is_none() {
+        ensure_plain_text_root(&root.content)?;
+    }
+
+    let target_text = target_text.unwrap_or(root.content.as_str()).trim();
     if target_text.is_empty() || target_text.contains('\n') || target_text.contains('\r') {
         return Err(KernelError::Input(String::from(
             "root apply text must be a non-empty single line",
@@ -569,6 +575,20 @@ fn validate_day_date(note_date: &str, error_message: &str) -> KernelResult<()> {
         .map_err(|_| KernelError::Input(String::from(error_message)))
 }
 
+fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
+    let fragments =
+        parse_content(content).map_err(|error| KernelError::Storage(error.to_string()))?;
+    if fragments
+        .iter()
+        .any(|fragment| matches!(fragment, ContentFragment::Link(_)))
+    {
+        return Err(KernelError::Input(String::from(
+            "root content cannot contain links",
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +664,25 @@ mod tests {
 
         let result = create_root(&mut store, "2026").expect("numeric root should be created");
         assert_eq!(result.root.rendered_content, "2026");
+    }
+
+    #[test]
+    fn create_root_reuses_consistent_match_search_text() {
+        let mut store = store();
+
+        let day_node = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note should be created");
+        let note = build_new_node(&store, "Topic appears here").expect("node should build");
+        store
+            .create_nodes(Placement::LastChildOf(day_node), &[note])
+            .expect("note should be created");
+
+        let first = create_root(&mut store, "Topic").expect("first root should succeed");
+        let second = create_root(&mut store, " Topic ").expect("second root should succeed");
+
+        assert_eq!(first.root.id, second.root.id);
+        assert_eq!(first.matches, second.matches);
     }
 
     #[derive(Default)]
@@ -842,5 +881,14 @@ mod tests {
 
         assert_eq!(result.note_date, "2026-04-11");
         assert_eq!(repository.create_daily_note_attempts, 1);
+    }
+
+    #[test]
+    fn create_root_rejects_link_bearing_content() {
+        let mut store = store();
+
+        let error =
+            create_root(&mut store, "See {{Topic}}").expect_err("link-bearing root should fail");
+        assert!(matches!(error, KernelError::Input(_)));
     }
 }
