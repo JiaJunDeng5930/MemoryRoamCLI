@@ -264,6 +264,7 @@ fn validate_root_update<R: WriteRepository>(
     }
 
     ensure_plain_text_root(raw_line)?;
+    ensure_safe_root_label_text(raw_line.as_str())?;
     if let Some(existing_root) = repository.find_root_node_by_content(raw_line)?
         && existing_root.id != node_id
     {
@@ -284,6 +285,15 @@ fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     {
         return Err(KernelError::Input(String::from(
             "root content cannot contain links",
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_safe_root_label_text(text: &str) -> KernelResult<()> {
+    if text.contains("{{") || text.contains("}}") {
+        return Err(KernelError::Input(String::from(
+            "root text cannot contain raw link delimiters",
         )));
     }
     Ok(())
