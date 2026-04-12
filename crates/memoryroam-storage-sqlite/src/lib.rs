@@ -1410,16 +1410,18 @@ fn find_root_node_by_content_from_handle(
     handle: &impl SqlHandle,
     content: &ContentLine,
 ) -> KernelResult<Option<StoredNode>> {
+    let lookup_key =
+        LookupKey::from_content(content).map_err(|error| KernelError::Input(error.to_string()))?;
     handle
         .query_row(
             "SELECT n.id
              FROM root_nodes AS r
              JOIN nodes AS n
                ON n.id = r.node_id
-             WHERE n.content = ?1
+             WHERE n.content_lookup_key = ?1
              ORDER BY n.id
              LIMIT 1",
-            params![content.as_str()],
+            params![lookup_key.as_str()],
             |row| node_id_from_row(row, 0),
         )
         .optional()
