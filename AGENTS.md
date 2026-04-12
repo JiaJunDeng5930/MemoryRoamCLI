@@ -32,7 +32,9 @@ Check whether the embedded project index is current with `cargo xtask agents-md-
 |.cargo:{config.toml}
 |.github:{workflows/}
 |.github/workflows:{quality.yml,release.yml}
-|crates:{memoryroam-cli/,memoryroam-domain/,memoryroam-read/,memoryroam-storage-sqlite/,memoryroam-write/}
+|crates:{memoryroam-application/,memoryroam-cli/,memoryroam-domain/,memoryroam-read/,memoryroam-storage-sqlite/,memoryroam-write/}
+|crates/memoryroam-application:{Cargo.toml,README.md,src/}
+|crates/memoryroam-application/src:{lib.rs}
 |crates/memoryroam-cli:{Cargo.toml,README.md,src/,tests/}
 |crates/memoryroam-cli/src:{main.rs}
 |crates/memoryroam-cli/tests:{cli.rs}

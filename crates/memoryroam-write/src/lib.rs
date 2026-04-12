@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use memoryroam_domain::{
     AliasText, CanonicalizedContent, ContentLine, DeleteMode, KernelError, KernelResult, LookupKey,
-    NodeId, Placement, WriteRepository, canonicalize_content,
+    NodeId, NodeUpdateRecord, Placement, WriteRepository, canonicalize_content,
 };
 
 /// Initializes the target repository schema.
@@ -54,6 +54,12 @@ pub fn update_node<R: WriteRepository>(
     node_id: NodeId,
     raw_content: &str,
 ) -> KernelResult<()> {
+    if repository.is_daily_note_node(node_id)? {
+        return Err(KernelError::Constraint(String::from(
+            "daily note date nodes are immutable",
+        )));
+    }
+
     let content =
         ContentLine::parse(raw_content).map_err(|error| KernelError::Input(error.to_string()))?;
     let CanonicalizedContent {
@@ -70,7 +76,64 @@ pub fn update_node<R: WriteRepository>(
 
     ensure_no_link_cycle(repository, node_id, &outgoing_links)?;
 
-    repository.update_node_content(node_id, &content, &lookup_key, &outgoing_links)
+    repository.update_node_contents(&[NodeUpdateRecord {
+        node_id,
+        content,
+        lookup_key,
+        outgoing_links,
+    }])
+}
+
+/// Validates and canonicalizes multiple node updates before writing them atomically.
+pub fn update_nodes<R: WriteRepository>(
+    repository: &mut R,
+    updates: &[(NodeId, String)],
+) -> KernelResult<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    let mut canonical_updates = Vec::with_capacity(updates.len());
+    let mut seen_node_ids = BTreeSet::new();
+
+    for (node_id, raw_content) in updates {
+        if !seen_node_ids.insert(*node_id) {
+            return Err(KernelError::Input(format!(
+                "node {node_id} was updated more than once"
+            )));
+        }
+
+        if repository.is_daily_note_node(*node_id)? {
+            return Err(KernelError::Constraint(String::from(
+                "daily note date nodes are immutable",
+            )));
+        }
+
+        let content = ContentLine::parse(raw_content.clone())
+            .map_err(|error| KernelError::Input(error.to_string()))?;
+        let CanonicalizedContent {
+            content,
+            lookup_key,
+            outgoing_links,
+        } = canonicalize_content(repository, &content)?;
+
+        if outgoing_links.contains(node_id) {
+            return Err(KernelError::Constraint(format!(
+                "node {node_id} cannot link to itself"
+            )));
+        }
+
+        ensure_no_link_cycle(repository, *node_id, &outgoing_links)?;
+
+        canonical_updates.push(NodeUpdateRecord {
+            node_id: *node_id,
+            content,
+            lookup_key,
+            outgoing_links,
+        });
+    }
+
+    repository.update_node_contents(&canonical_updates)
 }
 
 fn ensure_no_link_cycle<R: WriteRepository>(
@@ -106,6 +169,12 @@ pub fn move_node<R: WriteRepository>(
     node_id: NodeId,
     placement: Placement,
 ) -> KernelResult<()> {
+    if repository.is_daily_note_node(node_id)? {
+        return Err(KernelError::Constraint(String::from(
+            "daily note date nodes are immutable",
+        )));
+    }
+
     repository.move_node(node_id, placement)
 }
 
@@ -115,6 +184,12 @@ pub fn delete_node<R: WriteRepository>(
     node_id: NodeId,
     mode: DeleteMode,
 ) -> KernelResult<()> {
+    if repository.is_daily_note_node(node_id)? {
+        return Err(KernelError::Constraint(String::from(
+            "daily note date nodes are immutable",
+        )));
+    }
+
     repository.delete_node(node_id, mode)
 }
 
@@ -124,6 +199,12 @@ pub fn add_aliases<R: WriteRepository>(
     node_id: NodeId,
     raw_aliases: &[String],
 ) -> KernelResult<()> {
+    if repository.is_daily_note_node(node_id)? {
+        return Err(KernelError::Constraint(String::from(
+            "daily note date nodes cannot have aliases",
+        )));
+    }
+
     if raw_aliases.is_empty() {
         return Err(KernelError::Input(String::from(
             "alias add requires at least one alias",
@@ -145,6 +226,12 @@ pub fn remove_alias<R: WriteRepository>(
     node_id: NodeId,
     raw_alias: &str,
 ) -> KernelResult<()> {
+    if repository.is_daily_note_node(node_id)? {
+        return Err(KernelError::Constraint(String::from(
+            "daily note date nodes cannot have aliases",
+        )));
+    }
+
     let alias = AliasText::new(raw_alias.to_owned())
         .map_err(|error| KernelError::Input(error.to_string()))?;
 
@@ -161,7 +248,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use memoryroam_domain::{LookupCandidate, NewNodeRecord, ReadRepository, StoredNode};
+    use memoryroam_domain::{
+        DailyNoteRecord, LookupCandidate, NewNodeRecord, ReadRepository, StoredNode,
+    };
 
     #[derive(Default)]
     struct FakeRepository {
@@ -230,6 +319,37 @@ mod tests {
 
         fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
             Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(None)
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            _content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            Ok(None)
+        }
+
+        fn search_text_matches(&self, _needle: &str) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
         }
     }
 
@@ -311,20 +431,20 @@ mod tests {
             Ok(created_ids)
         }
 
-        fn update_node_content(
+        fn update_node_contents(
             &mut self,
-            node_id: NodeId,
-            content: &ContentLine,
-            lookup_key: &LookupKey,
-            outgoing_links: &[NodeId],
+            updates: &[memoryroam_domain::NodeUpdateRecord],
         ) -> KernelResult<()> {
-            self.outgoing.insert(node_id, outgoing_links.to_vec());
-            self.updated.push((
-                node_id,
-                content.clone(),
-                lookup_key.clone(),
-                outgoing_links.to_vec(),
-            ));
+            for update in updates {
+                self.outgoing
+                    .insert(update.node_id, update.outgoing_links.clone());
+                self.updated.push((
+                    update.node_id,
+                    update.content.clone(),
+                    update.lookup_key.clone(),
+                    update.outgoing_links.clone(),
+                ));
+            }
             Ok(())
         }
 
@@ -344,6 +464,26 @@ mod tests {
 
         fn remove_alias(&mut self, _node_id: NodeId, _alias: &AliasText) -> KernelResult<()> {
             Ok(())
+        }
+
+        fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId> {
+            self.create_nodes(Placement::TopLevelLast, std::slice::from_ref(node))
+                .map(|mut ids| ids.remove(0))
+        }
+
+        fn create_daily_note_node(&mut self, note_date: &str) -> KernelResult<NodeId> {
+            let content = ContentLine::parse(note_date)
+                .map_err(|error| KernelError::Input(error.to_string()))?;
+            let lookup_key = LookupKey::from_content(&content)
+                .map_err(|error| KernelError::Input(error.to_string()))?;
+            let node = NewNodeRecord {
+                content,
+                lookup_key,
+                outgoing_links: Vec::new(),
+                aliases: Vec::new(),
+            };
+            self.create_nodes(Placement::TopLevelLast, &[node])
+                .map(|mut ids| ids.remove(0))
         }
     }
 

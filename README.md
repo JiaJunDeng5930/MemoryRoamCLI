@@ -33,6 +33,7 @@ cargo build --bin memoryroam
 
 ## Workspace Layout
 
+- `crates/memoryroam-application`: unified user-facing workflows shared by the CLI.
 - `crates/memoryroam-cli`: command-line entrypoint and text output.
 - `crates/memoryroam-domain`: core types, parsing, canonicalization, rendering, and repository contracts.
 - `crates/memoryroam-read`: read-only use cases and rendered read models.
@@ -68,96 +69,58 @@ If the file does not exist, the command fails instead of silently creating an em
 
 ## Common Tasks
 
-Create a top-level node:
+Capture a note into today's daily note:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 create --content "Software engineering"
+cargo run --bin memoryroam -- --db notes.sqlite3 note "Design issue 7 interactions"
 ```
 
-Create multiple sibling nodes in one command:
+Open today's daily note:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 create --content $'Topic\nSee {{Topic}}'
+cargo run --bin memoryroam -- --db notes.sqlite3 day
 ```
 
-Add aliases to a node:
+Open a specific daily note:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 alias add --id 1 --text "SWE" --text "engineering"
+cargo run --bin memoryroam -- --db notes.sqlite3 day 2026-04-11
 ```
 
-Read a node with structure context and incoming links:
+Read one node with context markers:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 read --id 1
+cargo run --bin memoryroam -- --db notes.sqlite3 read 42
 ```
 
-List top-level nodes:
+Create or reuse a root node and list matching notes:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 list --top-level
+cargo run --bin memoryroam -- --db notes.sqlite3 root create "Software engineering"
 ```
 
-List direct children of a node:
+Rewrite selected notes to link to one root node:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 list --children-of 1
-```
-
-Update node content from an argument:
-
-```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 update --id 2 --content "See {{1}}"
-```
-
-Update node content from stdin:
-
-```bash
-printf 'Updated note\n' | cargo run --bin memoryroam -- --db notes.sqlite3 update --id 2
-```
-
-Move a node before another node:
-
-```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 move --id 3 --before 1
-```
-
-Move a node under a parent:
-
-```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 move --id 3 --last-child-of 1
-```
-
-Delete a subtree:
-
-```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 delete --id 3 --cascade
-```
-
-Delete a node and reparent its children:
-
-```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 delete --id 3 --after 1
-```
-
-Remove an alias using normalized lookup text:
-
-```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 alias remove --id 1 --text "topic"
+cargo run --bin memoryroam -- --db notes.sqlite3 root apply 12 --node 41 --node 42
 ```
 
 ## Data Rules
 
 - Node content is always a single line.
-- Multi-line `create` input means multiple sibling nodes.
+- `note` creates exactly one node and always appends it under today's daily note.
+- Root nodes and daily note date nodes are both top-level nodes, but top-level nodes never participate in sibling chains.
+- Daily note date nodes are represented by ordinary `nodes` rows whose `content` is `YYYY-MM-DD`.
+- Daily note date nodes are immutable through ordinary write operations.
 - Links are stored in canonical form, using stable node IDs internally.
 - Lookup normalization trims surrounding whitespace and rejects purely numeric or reserved-syntax keys.
 - `read` renders unlabeled links as `{{id::>current target content}}`.
+- Root-link rewrites only replace plain-text matches and do not rewrite existing link tokens.
 - Create and update reject link cycles before they are persisted.
-- Multi-line `create` is atomic: later failures do not leave earlier lines behind.
 
 ## Package Manuals
 
+- [`memoryroam-application`](./crates/memoryroam-application/README.md)
 - [`memoryroam-domain`](./crates/memoryroam-domain/README.md)
 - [`memoryroam-read`](./crates/memoryroam-read/README.md)
 - [`memoryroam-write`](./crates/memoryroam-write/README.md)

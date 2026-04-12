@@ -2,17 +2,19 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
-use memoryroam_domain::{DeleteMode, KernelError, NodeId, Placement, ReadNodeView};
-use memoryroam_read::{list_aliases, list_children, list_top_level, read_node};
-use memoryroam_storage_sqlite::SqliteStore;
-use memoryroam_write::{
-    add_aliases, create_nodes, delete_node, init, move_node, remove_alias, update_node,
+use chrono::Local;
+use clap::{Args, Parser, Subcommand};
+use memoryroam_application::{
+    DayView, NoteResult, ReadContextView, RootApplyResult, RootCreateResult, apply_root_link,
+    create_root, note_today, open_day, read_node_context,
 };
+use memoryroam_domain::{KernelError, NodeId};
+use memoryroam_storage_sqlite::SqliteStore;
+use memoryroam_write::init;
 
 #[derive(Debug, Parser)]
 #[command(name = "memoryroam")]
-#[command(about = "Structured note kernel CLI")]
+#[command(about = "Note-taking oriented MemoryRoam CLI")]
 struct Cli {
     #[arg(long, global = true, default_value = "memoryroam.sqlite3")]
     db: PathBuf,
@@ -23,158 +25,45 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Init,
-    Create(CreateCommand),
-    Update(UpdateCommand),
-    Read(NodeSelector),
-    List(ListCommand),
-    Move(MoveCommand),
-    Delete(DeleteCommand),
-    Alias(AliasCommand),
+    Note(NoteCommand),
+    Day(DayCommand),
+    Read(ReadCommand),
+    Root(RootCommand),
 }
 
 #[derive(Debug, Args)]
-struct NodeSelector {
-    #[arg(long)]
-    id: i64,
-}
-
-#[derive(Debug, Args)]
-#[command(group(
-    ArgGroup::new("placement")
-        .args([
-            "top_level_first",
-            "top_level_last",
-            "before",
-            "after",
-            "first_child_of",
-            "last_child_of"
-        ])
-        .multiple(false)
-))]
-struct PlacementArgs {
-    #[arg(long)]
-    top_level_first: bool,
-    #[arg(long)]
-    top_level_last: bool,
-    #[arg(long)]
-    before: Option<i64>,
-    #[arg(long)]
-    after: Option<i64>,
-    #[arg(long)]
-    first_child_of: Option<i64>,
-    #[arg(long)]
-    last_child_of: Option<i64>,
-}
-
-impl PlacementArgs {
-    fn into_placement(self, default: Option<Placement>) -> Result<Placement, KernelError> {
-        if self.top_level_first {
-            return Ok(Placement::TopLevelFirst);
-        }
-        if self.top_level_last {
-            return Ok(Placement::TopLevelLast);
-        }
-        if let Some(id) = self.before {
-            return Ok(Placement::Before(parse_node_id(id)?));
-        }
-        if let Some(id) = self.after {
-            return Ok(Placement::After(parse_node_id(id)?));
-        }
-        if let Some(id) = self.first_child_of {
-            return Ok(Placement::FirstChildOf(parse_node_id(id)?));
-        }
-        if let Some(id) = self.last_child_of {
-            return Ok(Placement::LastChildOf(parse_node_id(id)?));
-        }
-
-        default.ok_or(KernelError::Input(String::from(
-            "a placement option is required",
-        )))
-    }
-}
-
-#[derive(Debug, Args)]
-struct CreateCommand {
-    #[arg(long)]
-    content: Option<String>,
-    #[arg(long)]
-    alias: Vec<String>,
-    #[command(flatten)]
-    placement: PlacementArgs,
-}
-
-#[derive(Debug, Args)]
-struct UpdateCommand {
-    #[arg(long)]
-    id: i64,
-    #[arg(long)]
+struct NoteCommand {
     content: Option<String>,
 }
 
 #[derive(Debug, Args)]
-struct ListCommand {
-    #[arg(long)]
-    top_level: bool,
-    #[arg(long)]
-    children_of: Option<i64>,
+struct DayCommand {
+    note_date: Option<String>,
 }
 
 #[derive(Debug, Args)]
-struct MoveCommand {
-    #[arg(long)]
+struct ReadCommand {
     id: i64,
-    #[command(flatten)]
-    placement: PlacementArgs,
 }
 
 #[derive(Debug, Args)]
-#[command(group(
-    ArgGroup::new("delete_mode")
-        .args([
-            "cascade",
-            "top_level_first",
-            "top_level_last",
-            "before",
-            "after",
-            "first_child_of",
-            "last_child_of"
-        ])
-        .multiple(false)
-        .required(true)
-))]
-struct DeleteCommand {
-    #[arg(long)]
-    id: i64,
-    #[arg(long)]
-    cascade: bool,
-    #[command(flatten)]
-    placement: PlacementArgs,
+struct RootCommand {
+    #[command(subcommand)]
+    command: RootSubcommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum AliasSubcommand {
-    Add {
-        #[arg(long)]
-        id: i64,
-        #[arg(long)]
-        text: Vec<String>,
+enum RootSubcommand {
+    Create {
+        content: Option<String>,
     },
-    Remove {
+    Apply {
+        root_id: i64,
         #[arg(long)]
-        id: i64,
+        text: Option<String>,
         #[arg(long)]
-        text: String,
+        node: Vec<i64>,
     },
-    List {
-        #[arg(long)]
-        id: i64,
-    },
-}
-
-#[derive(Debug, Args)]
-struct AliasCommand {
-    #[command(subcommand)]
-    command: AliasSubcommand,
 }
 
 fn main() -> ExitCode {
@@ -195,87 +84,62 @@ fn run(cli: Cli) -> Result<(), KernelError> {
             init(&mut store)?;
             println!("initialized {}", store.database_path().display());
         }
-        Command::Create(command) => {
-            let mut store = SqliteStore::open_existing(&cli.db)?;
-            let placement = command
-                .placement
-                .into_placement(Some(Placement::TopLevelLast))?;
-            let input = read_content_input(command.content)?;
-            let node_ids = create_nodes(&mut store, &input, &command.alias, placement)?;
-            println!("created:");
-            for node_id in node_ids {
-                println!("- {node_id}");
-            }
-        }
-        Command::Update(command) => {
+        Command::Note(command) => {
             let mut store = SqliteStore::open_existing(&cli.db)?;
             let content = read_content_input(command.content)?;
-            update_node(&mut store, parse_node_id(command.id)?, &content)?;
-            println!("updated {}", command.id);
+            let note_date = today_date();
+            let result = note_today(&mut store, &note_date, &content)?;
+            print_note_result(&result);
+        }
+        Command::Day(command) => {
+            let store = SqliteStore::open_existing(&cli.db)?;
+            let note_date = command.note_date.unwrap_or_else(today_date);
+            let result = open_day(&store, &note_date)?;
+            print_day_view(&result);
         }
         Command::Read(command) => {
             let store = SqliteStore::open_existing(&cli.db)?;
-            let view = read_node(&store, parse_node_id(command.id)?)?;
-            print_read_view(&view);
+            let result = read_node_context(&store, parse_node_id(command.id)?, 5500)?;
+            print_read_context(&result);
         }
-        Command::List(command) => {
-            let store = SqliteStore::open_existing(&cli.db)?;
-            if command.top_level == command.children_of.is_some() {
-                return Err(KernelError::Input(String::from(
-                    "choose either --top-level or --children-of",
-                )));
-            }
-
-            let entries = if command.top_level {
-                list_top_level(&store)?
-            } else {
-                list_children(
-                    &store,
-                    parse_node_id(command.children_of.expect("children_of checked above"))?,
-                )?
-            };
-
-            for entry in entries {
-                println!("{}\t{}", entry.id, entry.rendered_content);
-            }
-        }
-        Command::Move(command) => {
-            let mut store = SqliteStore::open_existing(&cli.db)?;
-            let placement = command.placement.into_placement(None)?;
-            move_node(&mut store, parse_node_id(command.id)?, placement)?;
-            println!("moved {}", command.id);
-        }
-        Command::Delete(command) => {
-            let mut store = SqliteStore::open_existing(&cli.db)?;
-            let mode = if command.cascade {
-                DeleteMode::Cascade
-            } else {
-                DeleteMode::Reparent(command.placement.into_placement(None)?)
-            };
-            delete_node(&mut store, parse_node_id(command.id)?, mode)?;
-            println!("deleted {}", command.id);
-        }
-        Command::Alias(alias_command) => match alias_command.command {
-            AliasSubcommand::Add { id, text } => {
+        Command::Root(root_command) => match root_command.command {
+            RootSubcommand::Create { content } => {
                 let mut store = SqliteStore::open_existing(&cli.db)?;
-                add_aliases(&mut store, parse_node_id(id)?, &text)?;
-                println!("alias-added {}", id);
+                let content = read_content_input(content)?;
+                let result = create_root(&mut store, &content)?;
+                print_root_create_result(&result);
             }
-            AliasSubcommand::Remove { id, text } => {
+            RootSubcommand::Apply {
+                root_id,
+                text,
+                node,
+            } => {
                 let mut store = SqliteStore::open_existing(&cli.db)?;
-                remove_alias(&mut store, parse_node_id(id)?, &text)?;
-                println!("alias-removed {}", id);
-            }
-            AliasSubcommand::List { id } => {
-                let store = SqliteStore::open_existing(&cli.db)?;
-                for alias in list_aliases(&store, parse_node_id(id)?)? {
-                    println!("{}", alias.as_str());
+                if node.is_empty() {
+                    return Err(KernelError::Input(String::from(
+                        "root apply requires at least one --node",
+                    )));
                 }
+                let node_ids = node
+                    .into_iter()
+                    .map(parse_node_id)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result = apply_root_link(
+                    &mut store,
+                    parse_node_id(root_id)?,
+                    text.as_deref(),
+                    &node_ids,
+                )?;
+                print_root_apply_result(&result);
             }
         },
     }
 
     Ok(())
+}
+
+fn today_date() -> String {
+    Local::now().date_naive().format("%F").to_string()
 }
 
 fn parse_node_id(value: i64) -> Result<NodeId, KernelError> {
@@ -293,7 +157,7 @@ fn read_content_input(explicit_content: Option<String>) -> Result<String, Kernel
         .map_err(|error| KernelError::Input(error.to_string()))?;
     if buffer.is_empty() {
         return Err(KernelError::Input(String::from(
-            "content must be provided via --content or stdin",
+            "content must be provided as an argument or via stdin",
         )));
     }
 
@@ -307,53 +171,83 @@ fn read_content_input(explicit_content: Option<String>) -> Result<String, Kernel
     Ok(buffer)
 }
 
-fn print_read_view(view: &ReadNodeView) {
-    println!("Node: {}", view.node.id);
-    println!("Content: {}", view.node.rendered_content);
-    println!(
-        "Parent: {}",
-        view.parent
-            .as_ref()
-            .map(format_node_line)
-            .unwrap_or_else(|| String::from("none"))
-    );
-    println!(
-        "Prev sibling: {}",
-        view.prev_sibling
-            .as_ref()
-            .map(format_node_line)
-            .unwrap_or_else(|| String::from("none"))
-    );
-    println!(
-        "Next sibling: {}",
-        view.next_sibling
-            .as_ref()
-            .map(format_node_line)
-            .unwrap_or_else(|| String::from("none"))
-    );
-    println!("Children:");
-    if view.children.is_empty() {
-        println!("- none");
-    } else {
-        for child in &view.children {
-            println!("- {}", format_node_line(child));
-        }
+fn print_note_result(result: &NoteResult) {
+    println!("{}", result.note_date);
+    println!("+[{}] {}", result.node.id, result.node.rendered_content);
+}
+
+fn print_day_view(view: &DayView) {
+    println!("{}", view.note_date);
+    println!();
+    if view.entries.is_empty() {
+        println!("empty");
+        println!("use: memoryroam note \"...\"");
+        return;
     }
-    println!("Incoming links:");
-    if view.incoming_links.is_empty() {
-        println!("- none");
-    } else {
-        for incoming in &view.incoming_links {
-            println!(
-                "- {} [ordinal {}] ({})",
-                format_node_line(&incoming.source),
-                incoming.ordinal,
-                incoming.path
-            );
-        }
+
+    for entry in &view.entries {
+        println!("-[{}] {}", entry.id, entry.rendered_content);
     }
 }
 
-fn format_node_line(line: &memoryroam_domain::NodeLine) -> String {
-    format!("{} -> {}", line.id, line.rendered_content)
+fn print_root_create_result(result: &RootCreateResult) {
+    println!("root [{}] {}", result.root.id, result.root.rendered_content);
+    println!();
+    println!("matches:");
+    for entry in &result.matches {
+        println!("-[{}] {}", entry.id, entry.rendered_content);
+    }
+    if result.hidden_match_count > 0 {
+        println!("...{} more matches...", result.hidden_match_count);
+    }
+}
+
+fn print_root_apply_result(result: &RootApplyResult) {
+    println!("updated:");
+    for entry in &result.updated_nodes {
+        println!("-[{}] {}", entry.id, entry.rendered_content);
+    }
+}
+
+fn print_read_context(view: &ReadContextView) {
+    if view.prev_hidden_count > 0 {
+        println!("...prev {} sibling hiding...", view.prev_hidden_count);
+    }
+    for entry in &view.prev_siblings {
+        println!("-[{}] {}", entry.id, entry.rendered_content);
+    }
+    println!("=[{}] {}", view.current.id, view.current.rendered_content);
+    for backlink in &view.backlinks {
+        println!(
+            ">[bl:{}] {}",
+            backlink.source.id, backlink.source.rendered_content
+        );
+    }
+    if view.hidden_backlink_count > 0 {
+        println!("...{} backlinks hiding...", view.hidden_backlink_count);
+    }
+    for child in &view.children {
+        println!("--[{}] {}", child.node.id, child.node.rendered_content);
+        for backlink in &child.backlinks {
+            println!(
+                ">>[bl:{}] {}",
+                backlink.source.id, backlink.source.rendered_content
+            );
+        }
+        if child.hidden_backlink_count > 0 {
+            println!(
+                "...{} child backlinks hiding...",
+                child.hidden_backlink_count
+            );
+        }
+    }
+    if view.hidden_child_count > 0 {
+        println!("...{} children hiding...", view.hidden_child_count);
+    }
+    for entry in &view.next_siblings {
+        println!("-[{}] {}", entry.id, entry.rendered_content);
+    }
+    if view.next_hidden_count > 0 {
+        println!("...next {} sibling hiding...", view.next_hidden_count);
+    }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "memoryroam-application"
+version = "0.1.0"
+edition = "2024"
+description = "User-facing application workflows for MemoryRoam."
+readme = "README.md"
+repository = "https://github.com/JiaJunDeng5930/MemoryRoamCLI"
+
+[dependencies]
+memoryroam-domain = { path = "../memoryroam-domain" }
+memoryroam-read = { path = "../memoryroam-read" }
+memoryroam-write = { path = "../memoryroam-write" }

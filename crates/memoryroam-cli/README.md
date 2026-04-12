@@ -1,6 +1,6 @@
 # memoryroam-cli
 
-`memoryroam-cli` is the executable package that exposes the MemoryRoam note kernel as a plain-text command-line interface.
+`memoryroam-cli` is the executable package that exposes MemoryRoam through note-taking oriented commands.
 
 ## Install
 
@@ -50,46 +50,40 @@ Initialize a database:
 cargo run --bin memoryroam -- --db notes.sqlite3 init
 ```
 
-Create one or more nodes:
+Capture a note into today's daily note:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 create --content "Topic"
-cargo run --bin memoryroam -- --db notes.sqlite3 create --content $'Topic\nSee {{Topic}}'
+cargo run --bin memoryroam -- --db notes.sqlite3 note "Draft the interaction design"
 ```
 
-Read a node:
+Open today's daily note:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 read --id 1
+cargo run --bin memoryroam -- --db notes.sqlite3 day
 ```
 
-List nodes:
+Open a specific daily note:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 list --top-level
-cargo run --bin memoryroam -- --db notes.sqlite3 list --children-of 1
+cargo run --bin memoryroam -- --db notes.sqlite3 day 2026-04-11
 ```
 
-Update content:
+Read one node with structural context markers:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 update --id 1 --content "Updated"
-printf 'Updated from stdin\n' | cargo run --bin memoryroam -- --db notes.sqlite3 update --id 1
+cargo run --bin memoryroam -- --db notes.sqlite3 read 42
 ```
 
-Move or delete nodes:
+Create or reuse a root node and list candidate notes:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 move --id 3 --before 1
-cargo run --bin memoryroam -- --db notes.sqlite3 delete --id 3 --cascade
+cargo run --bin memoryroam -- --db notes.sqlite3 root create "Software engineering"
 ```
 
-Manage aliases:
+Rewrite selected notes to one root link:
 
 ```bash
-cargo run --bin memoryroam -- --db notes.sqlite3 alias add --id 1 --text topic
-cargo run --bin memoryroam -- --db notes.sqlite3 alias list --id 1
-cargo run --bin memoryroam -- --db notes.sqlite3 alias remove --id 1 --text topic
+cargo run --bin memoryroam -- --db notes.sqlite3 root apply 12 --node 41 --node 42
 ```
 
 ## Operational Model
@@ -97,3 +91,6 @@ cargo run --bin memoryroam -- --db notes.sqlite3 alias remove --id 1 --text topi
 - Every command runs as a short-lived process.
 - Commands open the SQLite file, perform one operation, print plain text, and exit.
 - Only `init` creates the database file when it does not exist.
+- `note` always writes into today's daily note and never accepts an explicit target date.
+- `day` only reads; opening an empty date does not create anything.
+- `read` prints marker-based structural context rather than field-labeled diagnostics.
