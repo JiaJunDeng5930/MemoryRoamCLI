@@ -132,6 +132,7 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     let content = normalize_root_content(raw_content)?;
     ensure_plain_text_root(&content)?;
     ensure_safe_root_label_text(content.as_str())?;
+    ensure_referenceable_root_text(&content)?;
     let root = match repository.find_root_node_by_content(&content)? {
         Some(node) => node,
         None => {
@@ -156,11 +157,12 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
 
     let root_line = render_node_line(repository, &root)?;
     let search_text = normalized_root_lookup_text(&root.content);
-    let mut matches = repository
-        .search_text_matches(search_text)?
-        .into_iter()
-        .filter(|node| plain_text_contains(&node.content, search_text).unwrap_or(false))
-        .collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for node in repository.search_text_matches(search_text)? {
+        if plain_text_contains(&node.content, search_text)? {
+            matches.push(node);
+        }
+    }
     matches.sort_by(|left, right| compare_match_order(left, right, search_text));
 
     let hidden_match_count = matches.len().saturating_sub(DEFAULT_MATCH_LIMIT);
@@ -634,6 +636,12 @@ fn normalized_root_lookup_text(content: &ContentLine) -> &str {
     content.as_str().trim()
 }
 
+fn ensure_referenceable_root_text(content: &ContentLine) -> KernelResult<()> {
+    memoryroam_domain::LookupKey::new(content.as_str().to_owned())
+        .map(|_| ())
+        .map_err(|error| KernelError::Input(error.to_string()))
+}
+
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     let fragments =
         parse_content(content).map_err(|error| KernelError::Storage(error.to_string()))?;
@@ -732,20 +740,19 @@ mod tests {
     }
 
     #[test]
-    fn create_root_accepts_numeric_content() {
+    fn create_root_rejects_numeric_content() {
         let mut store = store();
 
-        let result = create_root(&mut store, "2026").expect("numeric root should be created");
-        assert_eq!(result.root.rendered_content, "2026");
+        let error = create_root(&mut store, "2026").expect_err("numeric root should be rejected");
+        assert!(matches!(error, KernelError::Input(_)));
     }
 
     #[test]
-    fn create_root_accepts_double_colon_plain_text() {
+    fn create_root_rejects_double_colon_plain_text() {
         let mut store = store();
 
-        let result =
-            create_root(&mut store, "std::fmt").expect("plain text root should be created");
-        assert_eq!(result.root.rendered_content, "std::fmt");
+        let error = create_root(&mut store, "std::fmt").expect_err("double colon root should fail");
+        assert!(matches!(error, KernelError::Input(_)));
     }
 
     #[test]
@@ -1025,6 +1032,192 @@ mod tests {
         let error =
             create_root(&mut store, "foo}}bar").expect_err("raw closing braces should be rejected");
         assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    struct MalformedSearchRepository {
+        nodes: BTreeMap<NodeId, StoredNode>,
+        root_id: NodeId,
+    }
+
+    impl ReadRepository for MalformedSearchRepository {
+        fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+            Ok(self.nodes.get(&node_id).cloned())
+        }
+
+        fn list_children(&self, _parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn list_outgoing_links(&self, _node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn list_incoming_links(&self, _node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn list_aliases(&self, _node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_node_contents(
+            &self,
+            node_ids: &BTreeSet<NodeId>,
+        ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+            Ok(node_ids
+                .iter()
+                .filter_map(|node_id| {
+                    self.nodes
+                        .get(node_id)
+                        .map(|node| (*node_id, node.content.clone()))
+                })
+                .collect())
+        }
+
+        fn lookup_candidates(&self, _key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+            Ok(Vec::new())
+        }
+
+        fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+            Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(None)
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+            Ok(node_id == self.root_id)
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(self.nodes.get(&self.root_id).cloned().into_iter().collect())
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            Ok(self
+                .nodes
+                .get(&self.root_id)
+                .filter(|node| node.content == *content)
+                .cloned())
+        }
+
+        fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+            Ok(self
+                .nodes
+                .values()
+                .filter(|node| node.id != self.root_id && node.content.as_str().contains(needle))
+                .cloned()
+                .collect())
+        }
+    }
+
+    impl WriteRepository for MalformedSearchRepository {
+        fn init_schema(&mut self) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_nodes_from_lines(
+            &mut self,
+            _placement: Placement,
+            _lines: &[ContentLine],
+            _aliases: &[AliasText],
+        ) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn create_nodes(
+            &mut self,
+            _placement: Placement,
+            _nodes: &[NewNodeRecord],
+        ) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn update_node_contents(
+            &mut self,
+            _updates: &[memoryroam_domain::NodeUpdateRecord],
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn move_node(&mut self, _node_id: NodeId, _placement: Placement) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn delete_node(
+            &mut self,
+            _node_id: NodeId,
+            _mode: memoryroam_domain::DeleteMode,
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn add_aliases(&mut self, _node_id: NodeId, _aliases: &[AliasText]) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn remove_alias(&mut self, _node_id: NodeId, _alias: &AliasText) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_root_node(&mut self, _node: &NewNodeRecord) -> KernelResult<NodeId> {
+            Ok(self.root_id)
+        }
+
+        fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+    }
+
+    #[test]
+    fn create_root_propagates_malformed_match_content() {
+        let root_id = NodeId::new(1).expect("valid test id");
+        let broken_id = NodeId::new(2).expect("valid test id");
+        let mut repository = MalformedSearchRepository {
+            nodes: BTreeMap::from([
+                (
+                    root_id,
+                    StoredNode {
+                        id: root_id,
+                        content: ContentLine::parse("Broken").expect("content should parse"),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: None,
+                        next_sibling_id: None,
+                    },
+                ),
+                (
+                    broken_id,
+                    StoredNode {
+                        id: broken_id,
+                        content: ContentLine::parse("Broken {{oops").expect("content should parse"),
+                        parent_id: None,
+                        first_child_id: None,
+                        last_child_id: None,
+                        prev_sibling_id: None,
+                        next_sibling_id: None,
+                    },
+                ),
+            ]),
+            root_id,
+        };
+
+        let error = create_root(&mut repository, "Broken")
+            .expect_err("malformed match content should be reported");
+        assert!(matches!(error, KernelError::Storage(_)));
     }
 
     #[test]
