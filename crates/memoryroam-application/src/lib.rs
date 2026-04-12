@@ -78,6 +78,7 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
 ) -> KernelResult<NoteResult> {
     validate_day_date(note_date, "invalid daily note date")?;
     let node = build_new_node(repository, raw_content)?;
+    let rendered_content = render_storage_content(repository, &node.content)?;
     let note_node_id = match repository.find_daily_note(note_date)? {
         Some(record) => record.node_id,
         None => match repository.create_daily_note_node(note_date) {
@@ -104,7 +105,10 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
 
     Ok(NoteResult {
         note_date: note_date.to_owned(),
-        node: render_node_line(repository, &created)?,
+        node: NodeLine {
+            id: created.id,
+            rendered_content,
+        },
     })
 }
 
@@ -133,6 +137,19 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     ensure_plain_text_root(&content)?;
     ensure_safe_root_label_text(content.as_str())?;
     ensure_referenceable_root_text(&content)?;
+    let search_text = normalized_root_lookup_text(&content);
+    let mut rendered_matches = Vec::new();
+    for node in repository.search_text_matches(search_text)? {
+        if plain_text_contains(&node.content, search_text)? {
+            rendered_matches.push(render_node_line(repository, &node)?);
+        }
+    }
+    rendered_matches.sort_by(|left, right| {
+        match_rank(left.rendered_content.as_str(), search_text)
+            .cmp(&match_rank(right.rendered_content.as_str(), search_text))
+            .then_with(|| left.id.value().cmp(&right.id.value()))
+    });
+
     let root = match repository.find_root_node_by_content(&content)? {
         Some(node) => node,
         None => {
@@ -156,21 +173,11 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     };
 
     let root_line = render_node_line(repository, &root)?;
-    let search_text = normalized_root_lookup_text(&root.content);
-    let mut matches = Vec::new();
-    for node in repository.search_text_matches(search_text)? {
-        if plain_text_contains(&node.content, search_text)? {
-            matches.push(node);
-        }
-    }
-    matches.sort_by(|left, right| compare_match_order(left, right, search_text));
-
-    let hidden_match_count = matches.len().saturating_sub(DEFAULT_MATCH_LIMIT);
-    let matches = matches
+    let hidden_match_count = rendered_matches.len().saturating_sub(DEFAULT_MATCH_LIMIT);
+    let matches = rendered_matches
         .into_iter()
         .take(DEFAULT_MATCH_LIMIT)
-        .map(|node| render_node_line(repository, &node))
-        .collect::<KernelResult<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
     Ok(RootCreateResult {
         root: root_line,
@@ -340,12 +347,6 @@ fn render_node_line<R: ReadRepository>(
         id: node.id,
         rendered_content: render_storage_content(repository, &node.content)?,
     })
-}
-
-fn compare_match_order(left: &StoredNode, right: &StoredNode, needle: &str) -> std::cmp::Ordering {
-    match_rank(left.content.as_str(), needle)
-        .cmp(&match_rank(right.content.as_str(), needle))
-        .then_with(|| left.id.value().cmp(&right.id.value()))
 }
 
 fn match_rank(content: &str, needle: &str) -> u8 {
@@ -1014,6 +1015,220 @@ mod tests {
 
         assert_eq!(result.note_date, "2026-04-11");
         assert_eq!(repository.create_daily_note_attempts, 1);
+    }
+
+    #[derive(Default)]
+    struct FailingMutationRepository {
+        nodes: BTreeMap<NodeId, StoredNode>,
+        aliases: BTreeMap<String, Vec<NodeId>>,
+        created_root: bool,
+        created_note: bool,
+    }
+
+    impl ReadRepository for FailingMutationRepository {
+        fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+            Ok(self.nodes.get(&node_id).cloned())
+        }
+
+        fn list_children(&self, _parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn list_outgoing_links(&self, _node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn list_incoming_links(&self, _node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn list_aliases(&self, _node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_node_contents(
+            &self,
+            node_ids: &BTreeSet<NodeId>,
+        ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+            Ok(node_ids
+                .iter()
+                .filter_map(|node_id| {
+                    self.nodes
+                        .get(node_id)
+                        .map(|node| (*node_id, node.content.clone()))
+                })
+                .collect())
+        }
+
+        fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+            let ids = self.aliases.get(key.as_str()).cloned().unwrap_or_default();
+            Ok(ids
+                .into_iter()
+                .map(|node_id| LookupCandidate {
+                    node_id,
+                    content: self
+                        .nodes
+                        .get(&node_id)
+                        .expect("candidate should exist")
+                        .content
+                        .clone(),
+                    path: format!("path:{node_id}"),
+                })
+                .collect())
+        }
+
+        fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+            Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(Some(DailyNoteRecord {
+                note_date: String::from("2026-04-12"),
+                node_id: NodeId::new(1).expect("valid test id"),
+            }))
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+            Ok(node_id == NodeId::new(1).expect("valid test id"))
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(self
+                .nodes
+                .get(&NodeId::new(1).expect("valid test id"))
+                .cloned()
+                .into_iter()
+                .collect())
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            _content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            Ok(None)
+        }
+
+        fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+            Ok(self
+                .nodes
+                .values()
+                .filter(|node| node.content.as_str().contains(needle))
+                .cloned()
+                .collect())
+        }
+    }
+
+    impl WriteRepository for FailingMutationRepository {
+        fn init_schema(&mut self) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_nodes_from_lines(
+            &mut self,
+            _placement: Placement,
+            _lines: &[ContentLine],
+            _aliases: &[AliasText],
+        ) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn create_nodes(
+            &mut self,
+            _placement: Placement,
+            _nodes: &[NewNodeRecord],
+        ) -> KernelResult<Vec<NodeId>> {
+            self.created_note = true;
+            Ok(vec![NodeId::new(2).expect("valid test id")])
+        }
+
+        fn update_node_contents(
+            &mut self,
+            _updates: &[memoryroam_domain::NodeUpdateRecord],
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn move_node(&mut self, _node_id: NodeId, _placement: Placement) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn delete_node(
+            &mut self,
+            _node_id: NodeId,
+            _mode: memoryroam_domain::DeleteMode,
+        ) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn add_aliases(&mut self, _node_id: NodeId, _aliases: &[AliasText]) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn remove_alias(&mut self, _node_id: NodeId, _alias: &AliasText) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_root_node(&mut self, _node: &NewNodeRecord) -> KernelResult<NodeId> {
+            self.created_root = true;
+            Ok(NodeId::new(3).expect("valid test id"))
+        }
+
+        fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> {
+            Ok(NodeId::new(1).expect("valid test id"))
+        }
+    }
+
+    #[test]
+    fn note_today_does_not_write_when_rendering_would_fail() {
+        let target_id = NodeId::new(9).expect("valid test id");
+        let mut repository = FailingMutationRepository::default();
+        repository.nodes.insert(
+            target_id,
+            StoredNode {
+                id: target_id,
+                content: ContentLine::parse("Broken {{oops").expect("content should parse"),
+                parent_id: None,
+                first_child_id: None,
+                last_child_id: None,
+                prev_sibling_id: None,
+                next_sibling_id: None,
+            },
+        );
+
+        note_today(&mut repository, "2026-04-12", "See {{9}}")
+            .expect_err("note should fail before writing");
+        assert!(!repository.created_note);
+    }
+
+    #[test]
+    fn create_root_does_not_write_when_match_rendering_would_fail() {
+        let target_id = NodeId::new(1).expect("valid test id");
+        let mut repository = FailingMutationRepository::default();
+        repository.nodes.insert(
+            target_id,
+            StoredNode {
+                id: target_id,
+                content: ContentLine::parse("Broken {{oops").expect("content should parse"),
+                parent_id: None,
+                first_child_id: None,
+                last_child_id: None,
+                prev_sibling_id: None,
+                next_sibling_id: None,
+            },
+        );
+
+        let error =
+            create_root(&mut repository, "Broken").expect_err("root should fail before writing");
+        assert!(matches!(error, KernelError::Storage(_)));
+        assert!(!repository.created_root);
     }
 
     #[test]
