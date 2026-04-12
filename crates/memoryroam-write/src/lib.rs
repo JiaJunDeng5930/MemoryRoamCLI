@@ -272,6 +272,7 @@ fn validate_root_update<R: ReadRepository>(
 
     ensure_plain_text_root(raw_line)?;
     ensure_safe_root_label_text(raw_line.as_str())?;
+    ensure_referenceable_root_text(raw_line)?;
     let normalized = raw_line.as_str().trim();
     let duplicate_root_exists = repository
         .list_root_nodes()?
@@ -323,6 +324,12 @@ fn ensure_safe_root_label_text(text: &str) -> KernelResult<()> {
 
 fn normalize_root_content(raw_content: &str) -> KernelResult<ContentLine> {
     ContentLine::parse(raw_content.trim()).map_err(|error| KernelError::Input(error.to_string()))
+}
+
+fn ensure_referenceable_root_text(content: &ContentLine) -> KernelResult<()> {
+    LookupKey::new(content.as_str().to_owned())
+        .map(|_| ())
+        .map_err(|error| KernelError::Input(error.to_string()))
 }
 
 struct PendingUpdateRepository<'a, R> {
@@ -946,5 +953,28 @@ mod tests {
         assert_eq!(repository.updated.len(), 2);
         assert_eq!(repository.updated[0].1.as_str(), "Beta");
         assert_eq!(repository.updated[1].1.as_str(), "See {{1::Beta}}");
+    }
+
+    #[test]
+    fn update_node_rejects_numeric_root_content() {
+        let mut repository = FakeRepository::default();
+        let root_id = NodeId::new(1).expect("valid test id");
+        repository.existing.insert(root_id, stored_node(1, "Root"));
+        repository.root_nodes.insert(root_id);
+
+        let error = update_node(&mut repository, root_id, "2026").expect_err("update should fail");
+        assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn update_node_rejects_double_colon_root_content() {
+        let mut repository = FakeRepository::default();
+        let root_id = NodeId::new(1).expect("valid test id");
+        repository.existing.insert(root_id, stored_node(1, "Root"));
+        repository.root_nodes.insert(root_id);
+
+        let error =
+            update_node(&mut repository, root_id, "std::fmt").expect_err("update should fail");
+        assert!(matches!(error, KernelError::Input(_)));
     }
 }
