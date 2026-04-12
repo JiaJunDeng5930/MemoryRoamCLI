@@ -25,9 +25,21 @@ pub fn create_nodes<R: WriteRepository>(
 ) -> KernelResult<Vec<NodeId>> {
     let lines = raw_input
         .lines()
-        .map(ContentLine::parse)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| KernelError::Input(error.to_string()))?;
+        .map(|line| {
+            if matches!(
+                placement,
+                Placement::TopLevelFirst | Placement::TopLevelLast
+            ) {
+                let content = normalize_root_content(line)?;
+                ensure_plain_text_root(&content)?;
+                ensure_safe_root_label_text(content.as_str())?;
+                ensure_referenceable_root_text(&content)?;
+                Ok(content)
+            } else {
+                ContentLine::parse(line).map_err(|error| KernelError::Input(error.to_string()))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     if lines.is_empty() {
         return Err(KernelError::Input(String::from(
@@ -787,6 +799,21 @@ mod tests {
     }
 
     #[test]
+    fn create_nodes_rejects_link_bearing_top_level_roots() {
+        let mut repository = FakeRepository::default();
+
+        let error = create_nodes(
+            &mut repository,
+            "Ref {{Topic}}",
+            &[],
+            Placement::TopLevelLast,
+        )
+        .expect_err("top-level root should reject link-bearing text");
+
+        assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
     fn update_node_canonicalizes_lookup_tokens_before_persisting() {
         let mut repository = FakeRepository::default();
         let target = stored_node(7, "Topic");
@@ -810,12 +837,16 @@ mod tests {
     #[test]
     fn create_nodes_allows_later_lines_to_reference_earlier_lines() {
         let mut repository = FakeRepository::default();
+        let parent_id = NodeId::new(10).expect("valid test id");
+        repository
+            .existing
+            .insert(parent_id, stored_node(10, "Parent"));
 
         let created_ids = create_nodes(
             &mut repository,
             "Topic\nSee {{Topic}}",
             &[],
-            Placement::TopLevelLast,
+            Placement::LastChildOf(parent_id),
         )
         .expect("multiline create should allow later lines to reference earlier ones");
 

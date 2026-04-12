@@ -678,9 +678,28 @@ impl WriteRepository for SqliteStore {
 
         let transaction = self.connection.transaction().map_err(map_sqlite_error)?;
         ensure_schema_initialized(&transaction)?;
+        let mut root_update_ids = Vec::new();
 
         for update in updates {
             ensure_node_exists_in_db(&transaction, update.node_id)?;
+            if is_root_node_in_handle(&transaction, update.node_id)? {
+                root_update_ids.push(update.node_id);
+                let temporary_lookup_key = format!("__pending_root_{}__", update.node_id.value());
+                transaction
+                    .execute(
+                        "UPDATE nodes
+                         SET content = ?1, content_lookup_key = ?2
+                         WHERE id = ?3",
+                        params![
+                            update.content.as_str(),
+                            temporary_lookup_key,
+                            update.node_id.value()
+                        ],
+                    )
+                    .map_err(map_sqlite_error)?;
+                refresh_outgoing_links(&transaction, update.node_id, &update.outgoing_links)?;
+                continue;
+            }
             transaction
                 .execute(
                     "UPDATE nodes
@@ -694,6 +713,20 @@ impl WriteRepository for SqliteStore {
                 )
                 .map_err(map_sqlite_error)?;
             refresh_outgoing_links(&transaction, update.node_id, &update.outgoing_links)?;
+        }
+
+        for update in updates {
+            if !root_update_ids.contains(&update.node_id) {
+                continue;
+            }
+            transaction
+                .execute(
+                    "UPDATE nodes
+                     SET content_lookup_key = ?1
+                     WHERE id = ?2",
+                    params![update.lookup_key.as_str(), update.node_id.value()],
+                )
+                .map_err(map_sqlite_error)?;
         }
 
         let repository = TransactionRepository {
@@ -2394,7 +2427,9 @@ mod tests {
         canonicalize_content,
     };
     use memoryroam_read::read_node;
-    use memoryroam_write::{add_aliases, create_nodes, delete_node, init, move_node, update_node};
+    use memoryroam_write::{
+        add_aliases, create_nodes, delete_node, init, move_node, update_node, update_nodes,
+    };
 
     use super::*;
 
@@ -2659,6 +2694,31 @@ mod tests {
             .expect("incoming links should load");
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0].source_node_id, source_id);
+    }
+
+    #[test]
+    fn batch_root_name_swaps_succeed_in_sqlite_storage() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        let first_id = store
+            .create_root_node(&node_record(&store, "Alpha"))
+            .expect("first root should be created");
+        let second_id = store
+            .create_root_node(&node_record(&store, "Beta"))
+            .expect("second root should be created");
+
+        update_nodes(
+            &mut store,
+            &[
+                (first_id, String::from("Beta")),
+                (second_id, String::from("Alpha")),
+            ],
+        )
+        .expect("root swap should succeed");
+
+        let roots = store.list_root_nodes().expect("root nodes should load");
+        assert_eq!(roots[0].content.as_str(), "Beta");
+        assert_eq!(roots[1].content.as_str(), "Alpha");
     }
 
     #[test]
