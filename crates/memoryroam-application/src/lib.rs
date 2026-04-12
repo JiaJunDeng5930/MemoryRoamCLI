@@ -155,7 +155,7 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     };
 
     let root_line = render_node_line(repository, &root)?;
-    let search_text = root.content.as_str().trim();
+    let search_text = root.content.as_str();
     let mut matches = repository
         .search_text_matches(search_text)?
         .into_iter()
@@ -197,7 +197,7 @@ pub fn apply_root_link<R: ReadRepository + memoryroam_domain::WriteRepository>(
         ensure_plain_text_root(&root.content)?;
     }
 
-    let target_text = target_text.unwrap_or(root.content.as_str()).trim();
+    let target_text = target_text.unwrap_or(root.content.as_str());
     if target_text.is_empty() || target_text.contains('\n') || target_text.contains('\r') {
         return Err(KernelError::Input(String::from(
             "root apply text must be a non-empty single line",
@@ -715,6 +715,27 @@ mod tests {
 
         assert_eq!(first.root.id, second.root.id);
         assert_eq!(first.matches, second.matches);
+    }
+
+    #[test]
+    fn apply_root_preserves_surrounding_whitespace_in_default_text() {
+        let mut store = store();
+
+        let root = create_root(&mut store, " Topic ").expect("root should be created");
+        let day_node = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note should be created");
+        let note = build_new_node(&store, "alpha  Topic  omega").expect("note should build");
+        let note_id = store
+            .create_nodes(Placement::LastChildOf(day_node), &[note])
+            .expect("note should be created")[0];
+
+        let result = apply_root_link(&mut store, root.root.id, None, &[note_id])
+            .expect("apply should succeed");
+        assert_eq!(
+            result.updated_nodes[0].rendered_content,
+            format!("alpha {{{{{}:: Topic }}}} omega", root.root.id)
+        );
     }
 
     #[derive(Default)]
