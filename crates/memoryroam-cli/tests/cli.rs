@@ -149,3 +149,24 @@ fn cli_read_uses_structural_markers_instead_of_field_labels() {
         )))
         .stdout(predicate::str::contains("Content:").not());
 }
+
+#[test]
+fn cli_failed_note_does_not_leave_an_empty_daily_note() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+
+    command(&temp_dir).arg("init").assert().success();
+
+    command(&temp_dir)
+        .args(["note", "See {{Missing}}"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "lookup `Missing` did not match any node",
+        ));
+
+    command(&temp_dir)
+        .arg("day")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("empty"));
+}

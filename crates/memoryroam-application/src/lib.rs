@@ -74,12 +74,12 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
     note_date: &str,
     raw_content: &str,
 ) -> KernelResult<NoteResult> {
+    let node = build_new_node(repository, raw_content)?;
     let note_node_id = match repository.find_daily_note(note_date)? {
         Some(record) => record.node_id,
         None => repository.create_daily_note_node(note_date)?,
     };
 
-    let node = build_new_node(repository, raw_content)?;
     let node_id = repository.create_nodes(
         memoryroam_domain::Placement::LastChildOf(note_node_id),
         &[node],
@@ -554,6 +554,20 @@ fn estimate_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memoryroam_storage_sqlite::SqliteStore;
+    use memoryroam_write::init;
+    use tempfile::NamedTempFile;
+
+    fn store() -> SqliteStore {
+        let path = NamedTempFile::new()
+            .expect("temp file should exist")
+            .into_temp_path()
+            .keep()
+            .expect("temp path should be kept");
+        let mut store = SqliteStore::open_or_create(path).expect("store should open");
+        init(&mut store).expect("schema init should succeed");
+        store
+    }
 
     #[test]
     fn rewrite_text_fragments_updates_plain_text_without_touching_links() {
@@ -571,6 +585,21 @@ mod tests {
         assert_eq!(
             rewritten,
             "{{99::Software engineering}} and {{12::Software engineering}}"
+        );
+    }
+
+    #[test]
+    fn failed_note_does_not_leave_a_daily_note_behind() {
+        let mut store = store();
+
+        let error =
+            note_today(&mut store, "2026-04-11", "See {{Missing}}").expect_err("note should fail");
+        assert!(matches!(error, KernelError::LookupMiss { .. }));
+        assert!(
+            store
+                .list_daily_notes()
+                .expect("daily notes should load")
+                .is_empty()
         );
     }
 }
