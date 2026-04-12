@@ -684,7 +684,7 @@ impl WriteRepository for SqliteStore {
             ensure_node_exists_in_db(&transaction, update.node_id)?;
             if is_root_node_in_handle(&transaction, update.node_id)? {
                 root_update_ids.push(update.node_id);
-                let temporary_lookup_key = format!("__pending_root_{}__", update.node_id.value());
+                let temporary_lookup_key = format!(" __pending_root_{}__ ", update.node_id.value());
                 transaction
                     .execute(
                         "UPDATE nodes

@@ -197,6 +197,16 @@ pub fn move_node<R: WriteRepository>(
             "daily note date nodes are immutable",
         )));
     }
+    if repository.is_root_node(node_id)?
+        && !matches!(
+            placement,
+            Placement::TopLevelFirst | Placement::TopLevelLast
+        )
+    {
+        return Err(KernelError::Constraint(String::from(
+            "root nodes must remain at the top level",
+        )));
+    }
 
     repository.move_node(node_id, placement)
 }
@@ -1059,5 +1069,21 @@ mod tests {
         let error =
             update_node(&mut repository, root_id, "std::fmt").expect_err("update should fail");
         assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn move_node_rejects_moving_roots_out_of_top_level() {
+        let mut repository = FakeRepository::default();
+        let root_id = NodeId::new(1).expect("valid test id");
+        let parent_id = NodeId::new(2).expect("valid test id");
+        repository.existing.insert(root_id, stored_node(1, "Root"));
+        repository
+            .existing
+            .insert(parent_id, stored_node(2, "Parent"));
+        repository.root_nodes.insert(root_id);
+
+        let error = move_node(&mut repository, root_id, Placement::LastChildOf(parent_id))
+            .expect_err("root move should fail");
+        assert!(matches!(error, KernelError::Constraint(_)));
     }
 }
