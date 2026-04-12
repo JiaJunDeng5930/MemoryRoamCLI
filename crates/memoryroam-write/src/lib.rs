@@ -111,6 +111,11 @@ pub fn update_nodes<R: WriteRepository>(
                 "node {node_id} was updated more than once"
             )));
         }
+        if repository.is_daily_note_node(*node_id)? {
+            return Err(KernelError::Constraint(String::from(
+                "daily note date nodes are immutable",
+            )));
+        }
 
         let validation_repository = PendingUpdateRepository {
             base: repository,
@@ -357,7 +362,7 @@ fn prepare_updated_content<R: ReadRepository>(
 
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     let fragments =
-        parse_content(content).map_err(|error| KernelError::Storage(error.to_string()))?;
+        parse_content(content).map_err(|error| KernelError::Input(error.to_string()))?;
     if fragments
         .iter()
         .any(|fragment| matches!(fragment, ContentFragment::Link(_)))
@@ -1093,6 +1098,145 @@ mod tests {
         assert_eq!(repository.updated.len(), 2);
         assert_eq!(repository.updated[0].1.as_str(), "New");
         assert_eq!(repository.updated[1].1.as_str(), "See {{1::topic}}");
+    }
+
+    #[test]
+    fn update_nodes_reject_daily_note_nodes() {
+        let mut repository = FakeRepository::default();
+        let day_id = NodeId::new(1).expect("valid test id");
+        repository
+            .existing
+            .insert(day_id, stored_node(1, "2026-04-12"));
+
+        struct DailyNoteRepo(FakeRepository, NodeId);
+
+        impl ReadRepository for DailyNoteRepo {
+            fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+                self.0.get_node(node_id)
+            }
+            fn list_children(&self, parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+                self.0.list_children(parent_id)
+            }
+            fn list_outgoing_links(&self, node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+                self.0.list_outgoing_links(node_id)
+            }
+            fn list_incoming_links(
+                &self,
+                node_id: NodeId,
+            ) -> KernelResult<Vec<memoryroam_domain::IncomingLinkRecord>> {
+                self.0.list_incoming_links(node_id)
+            }
+            fn list_aliases(&self, node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+                self.0.list_aliases(node_id)
+            }
+            fn fetch_node_contents(
+                &self,
+                node_ids: &BTreeSet<NodeId>,
+            ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+                self.0.fetch_node_contents(node_ids)
+            }
+            fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+                self.0.lookup_candidates(key)
+            }
+            fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+                self.0.node_path(node_id)
+            }
+            fn find_daily_note(&self, note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+                self.0.find_daily_note(note_date)
+            }
+            fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+                self.0.list_daily_notes()
+            }
+            fn is_daily_note_node(&self, node_id: NodeId) -> KernelResult<bool> {
+                Ok(node_id == self.1)
+            }
+            fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+                self.0.is_root_node(node_id)
+            }
+            fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+                self.0.list_root_nodes()
+            }
+            fn find_root_node_by_content(
+                &self,
+                content: &ContentLine,
+            ) -> KernelResult<Option<StoredNode>> {
+                self.0.find_root_node_by_content(content)
+            }
+            fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+                self.0.search_text_matches(needle)
+            }
+        }
+
+        impl WriteRepository for DailyNoteRepo {
+            fn init_schema(&mut self) -> KernelResult<()> {
+                self.0.init_schema()
+            }
+            fn create_nodes_from_lines(
+                &mut self,
+                placement: Placement,
+                lines: &[ContentLine],
+                aliases: &[AliasText],
+            ) -> KernelResult<Vec<NodeId>> {
+                self.0.create_nodes_from_lines(placement, lines, aliases)
+            }
+            fn create_nodes(
+                &mut self,
+                placement: Placement,
+                nodes: &[NewNodeRecord],
+            ) -> KernelResult<Vec<NodeId>> {
+                self.0.create_nodes(placement, nodes)
+            }
+            fn update_node_contents(
+                &mut self,
+                updates: &[memoryroam_domain::NodeUpdateRecord],
+            ) -> KernelResult<()> {
+                self.0.update_node_contents(updates)
+            }
+            fn move_node(&mut self, node_id: NodeId, placement: Placement) -> KernelResult<()> {
+                self.0.move_node(node_id, placement)
+            }
+            fn delete_node(&mut self, node_id: NodeId, mode: DeleteMode) -> KernelResult<()> {
+                self.0.delete_node(node_id, mode)
+            }
+            fn add_aliases(&mut self, node_id: NodeId, aliases: &[AliasText]) -> KernelResult<()> {
+                self.0.add_aliases(node_id, aliases)
+            }
+            fn remove_alias(&mut self, node_id: NodeId, alias: &AliasText) -> KernelResult<()> {
+                self.0.remove_alias(node_id, alias)
+            }
+            fn create_root_node(&mut self, node: &NewNodeRecord) -> KernelResult<NodeId> {
+                self.0.create_root_node(node)
+            }
+            fn create_daily_note_node(&mut self, note_date: &str) -> KernelResult<NodeId> {
+                self.0.create_daily_note_node(note_date)
+            }
+            fn create_note_in_daily_note(
+                &mut self,
+                note_date: &str,
+                node: &NewNodeRecord,
+            ) -> KernelResult<NodeId> {
+                self.0.create_note_in_daily_note(note_date, node)
+            }
+        }
+
+        let mut repository = DailyNoteRepo(repository, day_id);
+        let error = update_nodes(&mut repository, &[(day_id, String::from("2026-04-13"))])
+            .expect_err("daily note update should fail");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn create_nodes_report_malformed_top_level_root_text_as_input_error() {
+        let mut repository = FakeRepository::default();
+
+        let error = create_nodes(
+            &mut repository,
+            "Broken {{oops",
+            &[],
+            Placement::TopLevelLast,
+        )
+        .expect_err("malformed root text should fail");
+        assert!(matches!(error, KernelError::Input(_)));
     }
 
     #[test]
