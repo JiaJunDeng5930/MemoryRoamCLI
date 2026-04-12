@@ -92,7 +92,6 @@ pub fn update_nodes<R: WriteRepository>(
     let mut canonical_updates = Vec::with_capacity(updates.len());
     let mut pending_updates = BTreeMap::new();
     let mut seen_node_ids = BTreeSet::new();
-    let mut seen_root_lookup_keys = BTreeSet::new();
 
     for (node_id, raw_content) in updates {
         if !seen_node_ids.insert(*node_id) {
@@ -107,14 +106,7 @@ pub fn update_nodes<R: WriteRepository>(
         };
 
         let content = prepare_updated_content(&validation_repository, *node_id, raw_content)?;
-        let root_lookup_key = validate_root_update(&validation_repository, *node_id, &content)?;
-        if let Some(root_lookup_key) = root_lookup_key
-            && !seen_root_lookup_keys.insert(root_lookup_key)
-        {
-            return Err(KernelError::Constraint(String::from(
-                "root lookup keys must stay unique",
-            )));
-        }
+        validate_root_shape(&validation_repository, *node_id, &content)?;
         let CanonicalizedContent {
             content,
             lookup_key,
@@ -145,6 +137,12 @@ pub fn update_nodes<R: WriteRepository>(
         pending_updates = trial_updates;
         canonical_updates.push(update);
     }
+
+    let final_repository = PendingUpdateRepository {
+        base: repository,
+        pending_updates: &pending_updates,
+    };
+    ensure_unique_root_lookup_keys(&final_repository)?;
 
     repository.update_node_contents(&canonical_updates)
 }
@@ -270,9 +268,7 @@ fn validate_root_update<R: ReadRepository>(
         return Ok(None);
     }
 
-    ensure_plain_text_root(raw_line)?;
-    ensure_safe_root_label_text(raw_line.as_str())?;
-    ensure_referenceable_root_text(raw_line)?;
+    validate_root_shape(repository, node_id, raw_line)?;
     let normalized = raw_line.as_str().trim();
     let duplicate_root_exists = repository
         .list_root_nodes()?
@@ -285,6 +281,34 @@ fn validate_root_update<R: ReadRepository>(
     }
 
     Ok(Some(normalized.to_owned()))
+}
+
+fn validate_root_shape<R: ReadRepository>(
+    repository: &R,
+    node_id: NodeId,
+    raw_line: &ContentLine,
+) -> KernelResult<()> {
+    if !repository.is_root_node(node_id)? {
+        return Ok(());
+    }
+
+    ensure_plain_text_root(raw_line)?;
+    ensure_safe_root_label_text(raw_line.as_str())?;
+    ensure_referenceable_root_text(raw_line)?;
+    Ok(())
+}
+
+fn ensure_unique_root_lookup_keys<R: ReadRepository>(repository: &R) -> KernelResult<()> {
+    let mut seen = BTreeSet::new();
+    for root in repository.list_root_nodes()? {
+        let normalized = root.content.as_str().trim().to_owned();
+        if !seen.insert(normalized) {
+            return Err(KernelError::Constraint(String::from(
+                "root lookup keys must stay unique",
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_updated_content<R: ReadRepository>(
@@ -953,6 +977,34 @@ mod tests {
         assert_eq!(repository.updated.len(), 2);
         assert_eq!(repository.updated[0].1.as_str(), "Beta");
         assert_eq!(repository.updated[1].1.as_str(), "See {{1::Beta}}");
+    }
+
+    #[test]
+    fn update_nodes_allow_root_name_swaps() {
+        let mut repository = FakeRepository::default();
+        let first_id = NodeId::new(1).expect("valid test id");
+        let second_id = NodeId::new(2).expect("valid test id");
+        repository
+            .existing
+            .insert(first_id, stored_node(1, "Alpha"));
+        repository
+            .existing
+            .insert(second_id, stored_node(2, "Beta"));
+        repository.root_nodes.insert(first_id);
+        repository.root_nodes.insert(second_id);
+
+        update_nodes(
+            &mut repository,
+            &[
+                (first_id, String::from("Beta")),
+                (second_id, String::from("Alpha")),
+            ],
+        )
+        .expect("root swap should succeed");
+
+        assert_eq!(repository.updated.len(), 2);
+        assert_eq!(repository.updated[0].1.as_str(), "Beta");
+        assert_eq!(repository.updated[1].1.as_str(), "Alpha");
     }
 
     #[test]
