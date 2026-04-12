@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS root_nodes (
     node_id INTEGER PRIMARY KEY
             REFERENCES nodes(id)
             ON DELETE RESTRICT
-            DEFERRABLE INITIALLY DEFERRED
+            DEFERRABLE INITIALLY DEFERRED,
+    sort_order INTEGER NOT NULL UNIQUE
 );
 
 CREATE TABLE IF NOT EXISTS daily_notes (
@@ -264,8 +265,12 @@ CREATE TABLE IF NOT EXISTS root_nodes (
     node_id INTEGER PRIMARY KEY
             REFERENCES nodes(id)
             ON DELETE RESTRICT
-            DEFERRABLE INITIALLY DEFERRED
+            DEFERRABLE INITIALLY DEFERRED,
+    sort_order INTEGER NOT NULL UNIQUE
 );
+
+DROP VIEW IF EXISTS v_lookup_candidates;
+DROP VIEW IF EXISTS v_incoming_links;
 
 CREATE TABLE IF NOT EXISTS daily_notes (
     note_date TEXT PRIMARY KEY,
@@ -994,10 +999,18 @@ impl WriteRepository for SqliteStore {
         ensure_schema_initialized(&transaction)?;
 
         let node_id = insert_top_level_node(&transaction, node)?;
+        let next_sort_order = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), 0) + 1
+                 FROM root_nodes",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(map_sqlite_error)?;
         transaction
             .execute(
-                "INSERT INTO root_nodes (node_id) VALUES (?1)",
-                params![node_id.value()],
+                "INSERT INTO root_nodes (node_id, sort_order) VALUES (?1, ?2)",
+                params![node_id.value(), next_sort_order],
             )
             .map_err(map_sqlite_error)?;
 
@@ -1456,11 +1469,11 @@ fn migrate_v1_schema(connection: &mut Connection) -> KernelResult<()> {
             .map_err(map_sqlite_error)?;
     }
 
-    for node_id in root_node_ids {
+    for (index, node_id) in root_node_ids.into_iter().enumerate() {
         transaction
             .execute(
-                "INSERT OR IGNORE INTO root_nodes (node_id) VALUES (?1)",
-                params![node_id.value()],
+                "INSERT OR IGNORE INTO root_nodes (node_id, sort_order) VALUES (?1, ?2)",
+                params![node_id.value(), index as i64 + 1],
             )
             .map_err(map_sqlite_error)?;
     }
@@ -1615,15 +1628,15 @@ fn is_root_node_in_handle(handle: &impl SqlHandle, node_id: NodeId) -> KernelRes
 fn list_top_level_nodes_from_handle(handle: &impl SqlHandle) -> KernelResult<Vec<StoredNode>> {
     let mut statement = handle
         .prepare(
-            "SELECT n.id
-             FROM nodes AS n
-             LEFT JOIN root_nodes AS r
-               ON r.node_id = n.id
-             LEFT JOIN daily_notes AS d
-               ON d.node_id = n.id
-             WHERE n.parent_id IS NULL
-               AND (r.node_id IS NOT NULL OR d.node_id IS NOT NULL)
-             ORDER BY n.id",
+            "SELECT node_id
+             FROM (
+                 SELECT r.node_id AS node_id, 0 AS group_order, r.sort_order AS inner_order, '' AS date_order
+                 FROM root_nodes AS r
+                 UNION ALL
+                 SELECT d.node_id AS node_id, 1 AS group_order, 0 AS inner_order, d.note_date AS date_order
+                 FROM daily_notes AS d
+             )
+             ORDER BY group_order, inner_order, date_order",
         )
         .map_err(map_sqlite_error)?;
     let rows = statement
@@ -1646,7 +1659,7 @@ fn list_root_nodes_from_handle(handle: &impl SqlHandle) -> KernelResult<Vec<Stor
         .prepare(
             "SELECT node_id
              FROM root_nodes
-             ORDER BY node_id",
+             ORDER BY sort_order",
         )
         .map_err(map_sqlite_error)?;
     let rows = statement
@@ -2477,11 +2490,22 @@ mod tests {
                 first_child_id  INTEGER REFERENCES nodes(id),
                 last_child_id   INTEGER REFERENCES nodes(id)
             );
+            CREATE TABLE node_aliases (
+                node_id     INTEGER NOT NULL,
+                alias_text  TEXT NOT NULL,
+                alias_key   TEXT NOT NULL
+            );
+            CREATE TABLE node_links (
+                source_node_id  INTEGER NOT NULL,
+                ordinal         INTEGER NOT NULL,
+                target_node_id  INTEGER NOT NULL
+            );
             INSERT INTO nodes(id, content, content_lookup_key, parent_id, first_child_id, last_child_id, prev_sibling_id, next_sibling_id)
             VALUES
-                (1, 'Topic', 'Topic', NULL, NULL, NULL, NULL, 2),
-                (2, 'Other', 'Other', NULL, NULL, NULL, 1, NULL);
-            INSERT INTO tree_root(root_id, first_child_id, last_child_id) VALUES (1, 1, 2);
+                (1, 'A', 'A', NULL, NULL, NULL, 3, 2),
+                (2, 'B', 'B', NULL, NULL, NULL, 1, NULL),
+                (3, 'C', 'C', NULL, NULL, NULL, NULL, 1);
+            INSERT INTO tree_root(root_id, first_child_id, last_child_id) VALUES (1, 3, 2);
             "#,
         )
         .expect("legacy schema should be created");
@@ -2489,11 +2513,23 @@ mod tests {
         init(&mut store).expect("legacy schema should migrate");
 
         let roots = store.list_root_nodes().expect("root nodes should load");
-        assert_eq!(roots.len(), 2);
-        assert_eq!(roots[0].content.as_str(), "Topic");
-        assert_eq!(roots[1].content.as_str(), "Other");
+        assert_eq!(roots.len(), 3);
+        assert_eq!(roots[0].content.as_str(), "C");
+        assert_eq!(roots[1].content.as_str(), "A");
+        assert_eq!(roots[2].content.as_str(), "B");
         assert!(roots.iter().all(|node| node.prev_sibling_id.is_none()));
         assert!(roots.iter().all(|node| node.next_sibling_id.is_none()));
+
+        store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note should be created");
+        let key = LookupKey::new(String::from("2026-04-11")).expect("lookup key should parse");
+        assert!(
+            store
+                .lookup_candidates(&key)
+                .expect("lookup candidates should load")
+                .is_empty()
+        );
     }
 
     #[test]
