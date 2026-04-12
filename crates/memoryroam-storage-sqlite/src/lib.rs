@@ -182,18 +182,6 @@ BEGIN
         FROM daily_notes
         WHERE node_id = NEW.node_id
     );
-
-    SELECT RAISE(ABORT, 'root nodes cannot contain links')
-    WHERE EXISTS (
-        SELECT 1
-        FROM nodes
-        WHERE id = NEW.node_id
-          AND (
-              instr(content, '{{') > 0
-              OR instr(content, '}}') > 0
-              OR instr(content, '::') > 0
-          )
-    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key
@@ -230,269 +218,6 @@ AND EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'duplicate root lookup key');
-END;
-
-CREATE TRIGGER IF NOT EXISTS root_nodes_reject_link_syntax_on_update
-BEFORE UPDATE OF content ON nodes
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM root_nodes
-    WHERE node_id = OLD.id
-)
-AND (
-    instr(NEW.content, '{{') > 0
-    OR instr(NEW.content, '}}') > 0
-    OR instr(NEW.content, '::') > 0
-)
-BEGIN
-    SELECT RAISE(ABORT, 'root nodes cannot contain links');
-END;
-
-CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert
-BEFORE INSERT ON daily_notes
-FOR EACH ROW
-BEGIN
-    SELECT RAISE(ABORT, 'daily note node must be a top-level node without siblings')
-    WHERE NOT EXISTS (
-        SELECT 1
-        FROM nodes
-        WHERE id = NEW.node_id
-          AND parent_id IS NULL
-          AND prev_sibling_id IS NULL
-          AND next_sibling_id IS NULL
-          AND content = NEW.note_date
-    );
-
-    SELECT RAISE(ABORT, 'daily note node cannot also be a root node')
-    WHERE EXISTS (
-        SELECT 1
-        FROM root_nodes
-        WHERE node_id = NEW.node_id
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS daily_note_nodes_reject_update
-BEFORE UPDATE OF content, parent_id, prev_sibling_id, next_sibling_id ON nodes
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM daily_notes
-    WHERE node_id = OLD.id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'daily note date nodes are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS daily_note_nodes_reject_delete
-BEFORE DELETE ON nodes
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM daily_notes
-    WHERE node_id = OLD.id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'daily note date nodes are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS node_aliases_reject_daily_note_insert
-BEFORE INSERT ON node_aliases
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM daily_notes
-    WHERE node_id = NEW.node_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'daily note date nodes cannot have aliases');
-END;
-
-CREATE TRIGGER IF NOT EXISTS node_aliases_reject_daily_note_delete
-BEFORE DELETE ON node_aliases
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM daily_notes
-    WHERE node_id = OLD.node_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'daily note date nodes cannot have aliases');
-END;
-
-PRAGMA user_version = 2;
-"#;
-
-const LEGACY_MIGRATION_SCHEMA: &str = r#"
-PRAGMA foreign_keys = ON;
-
-CREATE TABLE IF NOT EXISTS root_nodes (
-    node_id INTEGER PRIMARY KEY
-            REFERENCES nodes(id)
-            ON DELETE RESTRICT
-            DEFERRABLE INITIALLY DEFERRED,
-    sort_order INTEGER NOT NULL UNIQUE
-);
-
-DROP VIEW IF EXISTS v_lookup_candidates;
-DROP VIEW IF EXISTS v_incoming_links;
-
-CREATE TABLE IF NOT EXISTS daily_notes (
-    note_date TEXT PRIMARY KEY,
-    node_id   INTEGER NOT NULL UNIQUE
-              REFERENCES nodes(id)
-              ON DELETE RESTRICT
-              DEFERRABLE INITIALLY DEFERRED,
-
-    CHECK (date(note_date) = note_date)
-);
-
-CREATE TABLE IF NOT EXISTS node_aliases (
-    node_id     INTEGER NOT NULL
-                REFERENCES nodes(id)
-                ON DELETE CASCADE
-                DEFERRABLE INITIALLY DEFERRED,
-
-    alias_text  TEXT NOT NULL,
-    alias_key   TEXT NOT NULL,
-
-    PRIMARY KEY (node_id, alias_text),
-    UNIQUE (node_id, alias_key)
-);
-
-CREATE TABLE IF NOT EXISTS node_links (
-    source_node_id  INTEGER NOT NULL
-                    REFERENCES nodes(id)
-                    ON DELETE CASCADE
-                    DEFERRABLE INITIALLY DEFERRED,
-
-    ordinal         INTEGER NOT NULL,
-    target_node_id  INTEGER NOT NULL
-                    REFERENCES nodes(id)
-                    DEFERRABLE INITIALLY DEFERRED,
-
-    PRIMARY KEY (source_node_id, ordinal)
-);
-
-CREATE INDEX IF NOT EXISTS idx_daily_notes_node_id
-    ON daily_notes(node_id);
-
-CREATE INDEX IF NOT EXISTS idx_aliases_alias_key
-    ON node_aliases(alias_key, node_id);
-
-CREATE INDEX IF NOT EXISTS idx_links_target_source
-    ON node_links(target_node_id, source_node_id, ordinal);
-
-CREATE VIEW IF NOT EXISTS v_lookup_candidates AS
-SELECT
-    id AS node_id,
-    content_lookup_key AS lookup_key,
-    'content' AS match_kind
-FROM nodes
-WHERE id NOT IN (SELECT node_id FROM daily_notes)
-UNION ALL
-SELECT
-    a.node_id,
-    alias_key AS lookup_key,
-    'alias' AS match_kind
-FROM node_aliases AS a
-WHERE a.node_id NOT IN (SELECT node_id FROM daily_notes);
-
-CREATE VIEW IF NOT EXISTS v_incoming_links AS
-SELECT
-    l.target_node_id,
-    l.source_node_id,
-    s.content AS source_content,
-    l.ordinal
-FROM node_links AS l
-JOIN nodes AS s
-  ON s.id = l.source_node_id;
-
-CREATE TRIGGER IF NOT EXISTS root_nodes_validate_insert
-BEFORE INSERT ON root_nodes
-FOR EACH ROW
-BEGIN
-    SELECT RAISE(ABORT, 'root node must be a top-level node without siblings')
-    WHERE NOT EXISTS (
-        SELECT 1
-        FROM nodes
-        WHERE id = NEW.node_id
-          AND parent_id IS NULL
-          AND prev_sibling_id IS NULL
-          AND next_sibling_id IS NULL
-    );
-
-    SELECT RAISE(ABORT, 'root node cannot also be a daily note')
-    WHERE EXISTS (
-        SELECT 1
-        FROM daily_notes
-        WHERE node_id = NEW.node_id
-    );
-
-    SELECT RAISE(ABORT, 'root nodes cannot contain links')
-    WHERE EXISTS (
-        SELECT 1
-        FROM nodes
-        WHERE id = NEW.node_id
-          AND (
-              instr(content, '{{') > 0
-              OR instr(content, '}}') > 0
-              OR instr(content, '::') > 0
-          )
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key
-BEFORE INSERT ON root_nodes
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM root_nodes AS r
-    JOIN nodes AS existing
-      ON existing.id = r.node_id
-    JOIN nodes AS incoming
-      ON incoming.id = NEW.node_id
-    WHERE existing.content_lookup_key = incoming.content_lookup_key
-)
-BEGIN
-    SELECT RAISE(ABORT, 'duplicate root lookup key');
-END;
-
-CREATE TRIGGER IF NOT EXISTS root_nodes_reject_duplicate_lookup_key_on_update
-BEFORE UPDATE OF content_lookup_key ON nodes
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM root_nodes
-    WHERE node_id = OLD.id
-)
-AND EXISTS (
-    SELECT 1
-    FROM root_nodes AS r
-    JOIN nodes AS existing
-      ON existing.id = r.node_id
-    WHERE r.node_id <> OLD.id
-      AND existing.content_lookup_key = NEW.content_lookup_key
-)
-BEGIN
-    SELECT RAISE(ABORT, 'duplicate root lookup key');
-END;
-
-CREATE TRIGGER IF NOT EXISTS root_nodes_reject_link_syntax_on_update
-BEFORE UPDATE OF content ON nodes
-FOR EACH ROW
-WHEN EXISTS (
-    SELECT 1
-    FROM root_nodes
-    WHERE node_id = OLD.id
-)
-AND (
-    instr(NEW.content, '{{') > 0
-    OR instr(NEW.content, '}}') > 0
-    OR instr(NEW.content, '::') > 0
-)
-BEGIN
-    SELECT RAISE(ABORT, 'root nodes cannot contain links');
 END;
 
 CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert
@@ -818,10 +543,9 @@ impl WriteRepository for SqliteStore {
                 .connection
                 .execute_batch(SCHEMA)
                 .map_err(map_sqlite_error),
-            1 => migrate_v1_schema(&mut self.connection),
             2 => Ok(()),
             other => Err(KernelError::Storage(format!(
-                "unsupported schema version {other}; rebuild the database for schema v2"
+                "unsupported schema version {other}"
             ))),
         }
     }
@@ -1554,61 +1278,10 @@ fn ensure_schema_initialized(handle: &impl SqlHandle) -> KernelResult<()> {
         .map_err(map_sqlite_error)?;
     if version != 2 {
         return Err(KernelError::Storage(format!(
-            "unsupported schema version {version}; run `memoryroam init`"
+            "unsupported schema version {version}"
         )));
     }
     Ok(())
-}
-
-fn migrate_v1_schema(connection: &mut Connection) -> KernelResult<()> {
-    let transaction = connection.transaction().map_err(map_sqlite_error)?;
-    transaction
-        .execute_batch(LEGACY_MIGRATION_SCHEMA)
-        .map_err(map_sqlite_error)?;
-
-    let mut current = transaction
-        .query_row(
-            "SELECT first_child_id
-             FROM tree_root
-             WHERE root_id = 1",
-            [],
-            |row| optional_node_id_from_row(row, 0),
-        )
-        .optional()
-        .map_err(map_sqlite_error)?
-        .flatten();
-
-    let mut root_node_ids = Vec::new();
-    while let Some(node_id) = current {
-        let node = fetch_node(&transaction, node_id)?.ok_or(KernelError::StorageCorruption(
-            format!("missing legacy root node {node_id}"),
-        ))?;
-        current = node.next_sibling_id;
-        root_node_ids.push(node_id);
-    }
-
-    for node_id in &root_node_ids {
-        transaction
-            .execute(
-                "UPDATE nodes
-                 SET prev_sibling_id = NULL,
-                     next_sibling_id = NULL
-                 WHERE id = ?1",
-                params![node_id.value()],
-            )
-            .map_err(map_sqlite_error)?;
-    }
-
-    for (index, node_id) in root_node_ids.into_iter().enumerate() {
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO root_nodes (node_id, sort_order) VALUES (?1, ?2)",
-                params![node_id.value(), index as i64 + 1],
-            )
-            .map_err(map_sqlite_error)?;
-    }
-
-    transaction.commit().map_err(map_sqlite_error)
 }
 
 fn map_sqlite_error(error: rusqlite::Error) -> KernelError {
@@ -2599,7 +2272,7 @@ mod tests {
     }
 
     #[test]
-    fn init_schema_migrates_legacy_root_nodes() {
+    fn init_schema_rejects_legacy_schema_versions() {
         let mut store = store();
 
         store.connection.execute_batch(
@@ -2640,26 +2313,8 @@ mod tests {
         )
         .expect("legacy schema should be created");
 
-        init(&mut store).expect("legacy schema should migrate");
-
-        let roots = store.list_root_nodes().expect("root nodes should load");
-        assert_eq!(roots.len(), 3);
-        assert_eq!(roots[0].content.as_str(), "C");
-        assert_eq!(roots[1].content.as_str(), "A");
-        assert_eq!(roots[2].content.as_str(), "B");
-        assert!(roots.iter().all(|node| node.prev_sibling_id.is_none()));
-        assert!(roots.iter().all(|node| node.next_sibling_id.is_none()));
-
-        store
-            .create_daily_note_node("2026-04-11")
-            .expect("daily note should be created");
-        let key = LookupKey::new(String::from("2026-04-11")).expect("lookup key should parse");
-        assert!(
-            store
-                .lookup_candidates(&key)
-                .expect("lookup candidates should load")
-                .is_empty()
-        );
+        let error = init(&mut store).expect_err("legacy schema should be rejected");
+        assert!(matches!(error, KernelError::Storage(_)));
     }
 
     #[test]

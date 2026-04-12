@@ -45,3 +45,4 @@ let _path = store.database_path();
 - The crate uses the bundled SQLite library through `rusqlite`.
 - Batch creation and cycle checks run inside the same SQLite transaction.
 - Read-only commands use `open_existing` so a mistyped path does not create an empty database file.
+- The current schema is for the unreleased note-taking redesign only; older database files are out of scope and no migration path is provided.
