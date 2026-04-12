@@ -1,5 +1,5 @@
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use chrono::Local;
@@ -98,7 +98,7 @@ fn run(cli: Cli) -> Result<(), KernelError> {
             let store = SqliteStore::open_existing(&cli.db)?;
             let note_date = command.note_date.unwrap_or_else(today_date);
             let result = open_day(&store, &note_date)?;
-            print_day_view(&result);
+            print_day_view(&result, &cli.db);
         }
         Command::Read(command) => {
             let store = SqliteStore::open_existing(&cli.db)?;
@@ -179,13 +179,16 @@ fn print_note_result(result: &NoteResult) {
     println!("+[{}] {}", result.node.id, result.node.rendered_content);
 }
 
-fn print_day_view(view: &DayView) {
+fn print_day_view(view: &DayView, database_path: &Path) {
     println!("{}", view.note_date);
     println!();
     if view.entries.is_empty() {
         println!("empty");
         if view.note_date == today_date() {
-            println!("use: memoryroam note \"...\"");
+            println!(
+                "use: memoryroam --db {} note \"...\"",
+                database_path.display()
+            );
         }
         return;
     }
