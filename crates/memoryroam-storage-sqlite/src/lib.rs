@@ -497,9 +497,20 @@ impl ReadRepository for SqliteStore {
 
 impl WriteRepository for SqliteStore {
     fn init_schema(&mut self) -> KernelResult<()> {
-        self.connection
-            .execute_batch(SCHEMA)
-            .map_err(map_sqlite_error)
+        let version = self
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map_err(map_sqlite_error)?;
+        match version {
+            0 => self
+                .connection
+                .execute_batch(SCHEMA)
+                .map_err(map_sqlite_error),
+            2 => Ok(()),
+            other => Err(KernelError::Storage(format!(
+                "unsupported schema version {other}; rebuild the database for schema v2"
+            ))),
+        }
     }
 
     fn create_nodes_from_lines(
@@ -2163,6 +2174,19 @@ mod tests {
                 .expect("daily notes should load")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn init_schema_rejects_legacy_schema_versions() {
+        let mut store = store();
+
+        store
+            .connection
+            .execute_batch("PRAGMA user_version = 1;")
+            .expect("legacy version should be set");
+
+        let error = init(&mut store).expect_err("legacy schema should be rejected");
+        assert!(matches!(error, KernelError::Storage(_)));
     }
 
     #[test]

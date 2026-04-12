@@ -414,7 +414,9 @@ version = "0.1.0"
 dependencies = [
  "memoryroam-domain",
  "memoryroam-read",
+ "memoryroam-storage-sqlite",
  "memoryroam-write",
+ "tempfile",
 ]
 
 [[package]]
