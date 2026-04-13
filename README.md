@@ -6,7 +6,6 @@ Each command starts a fresh process, opens the database file, performs one opera
 ## Install
 
 Published builds are distributed through GitHub Releases.
-The repository does not have a tagged release yet, so the release-based install commands below will start working after the first `vX.Y.Z` release is published.
 
 Install the latest published release on macOS or glibc-based Linux:
 
@@ -24,11 +23,18 @@ If you prefer a manual install, download a platform archive from the [Releases](
 Each archive contains the `memoryroam` executable.
 musl-based Linux distributions such as Alpine are not covered by the current release artifacts.
 
-Until the first tagged release exists, use a source checkout:
+To install a specific release such as `v0.1.0`, replace `latest` with the tag name:
 
 ```bash
-cargo build --bin memoryroam
-./target/debug/memoryroam --help
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/JiaJunDeng5930/MemoryRoamCLI/releases/download/v0.1.0/memoryroam-cli-installer.sh | sh
+```
+
+The installers place `memoryroam` into `CARGO_HOME/bin`.
+If `CARGO_HOME` is not set, the default location is `~/.cargo/bin`.
+Ensure that directory is present in `PATH`, then verify the installation:
+
+```bash
+memoryroam --help
 ```
 
 ## Workspace Layout
