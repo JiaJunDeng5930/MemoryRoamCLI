@@ -697,7 +697,7 @@ mod tests {
 
     use memoryroam_domain::{
         AliasText, DailyNoteRecord, IncomingLinkRecord, LookupCandidate, LookupKey, NewNodeRecord,
-        Placement, StoredNode, WriteRepository,
+        NodeUpdateRecord, Placement, StoredNode, WriteRepository,
     };
     use memoryroam_storage_sqlite::SqliteStore;
     use memoryroam_write::{add_aliases, init};
@@ -712,6 +712,181 @@ mod tests {
         let mut store = SqliteStore::open_or_create(path).expect("store should open");
         init(&mut store).expect("schema init should succeed");
         store
+    }
+
+    struct ConflictingRootRepository {
+        root: StoredNode,
+        note: StoredNode,
+    }
+
+    impl ReadRepository for ConflictingRootRepository {
+        fn get_node(&self, node_id: NodeId) -> KernelResult<Option<StoredNode>> {
+            if node_id == self.root.id {
+                return Ok(Some(self.root.clone()));
+            }
+            if node_id == self.note.id {
+                return Ok(Some(self.note.clone()));
+            }
+            Ok(None)
+        }
+
+        fn list_children(&self, _parent_id: Option<NodeId>) -> KernelResult<Vec<StoredNode>> {
+            Ok(Vec::new())
+        }
+
+        fn list_outgoing_links(&self, _node_id: NodeId) -> KernelResult<Vec<NodeId>> {
+            Ok(Vec::new())
+        }
+
+        fn list_incoming_links(&self, _node_id: NodeId) -> KernelResult<Vec<IncomingLinkRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn list_aliases(&self, _node_id: NodeId) -> KernelResult<Vec<AliasText>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_node_contents(
+            &self,
+            node_ids: &BTreeSet<NodeId>,
+        ) -> KernelResult<BTreeMap<NodeId, ContentLine>> {
+            let mut contents = BTreeMap::new();
+            for node_id in node_ids {
+                if *node_id == self.root.id {
+                    contents.insert(*node_id, self.root.content.clone());
+                } else if *node_id == self.note.id {
+                    contents.insert(*node_id, self.note.content.clone());
+                }
+            }
+            Ok(contents)
+        }
+
+        fn lookup_candidates(&self, key: &LookupKey) -> KernelResult<Vec<LookupCandidate>> {
+            if key.as_str() != "Topic" {
+                return Ok(Vec::new());
+            }
+
+            Ok(vec![
+                LookupCandidate {
+                    node_id: self.root.id,
+                    content: self.root.content.clone(),
+                    path: format!("path:{}", self.root.id),
+                },
+                LookupCandidate {
+                    node_id: self.note.id,
+                    content: self.note.content.clone(),
+                    path: format!("path:{}", self.note.id),
+                },
+            ])
+        }
+
+        fn node_path(&self, node_id: NodeId) -> KernelResult<String> {
+            Ok(format!("path:{node_id}"))
+        }
+
+        fn find_daily_note(&self, _note_date: &str) -> KernelResult<Option<DailyNoteRecord>> {
+            Ok(None)
+        }
+
+        fn list_daily_notes(&self) -> KernelResult<Vec<DailyNoteRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn is_daily_note_node(&self, _node_id: NodeId) -> KernelResult<bool> {
+            Ok(false)
+        }
+
+        fn is_root_node(&self, node_id: NodeId) -> KernelResult<bool> {
+            Ok(node_id == self.root.id)
+        }
+
+        fn list_root_nodes(&self) -> KernelResult<Vec<StoredNode>> {
+            Ok(vec![self.root.clone()])
+        }
+
+        fn find_root_node_by_content(
+            &self,
+            content: &ContentLine,
+        ) -> KernelResult<Option<StoredNode>> {
+            if content.as_str() == self.root.content.as_str() {
+                return Ok(Some(self.root.clone()));
+            }
+            Ok(None)
+        }
+
+        fn search_text_matches(&self, needle: &str) -> KernelResult<Vec<StoredNode>> {
+            let mut matches = Vec::new();
+            if self.root.content.as_str().contains(needle) {
+                matches.push(self.root.clone());
+            }
+            if self.note.content.as_str().contains(needle) {
+                matches.push(self.note.clone());
+            }
+            Ok(matches)
+        }
+    }
+
+    impl WriteRepository for ConflictingRootRepository {
+        fn init_schema(&mut self) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn create_nodes_from_lines(
+            &mut self,
+            _placement: Placement,
+            _lines: &[ContentLine],
+            _aliases: &[AliasText],
+        ) -> KernelResult<Vec<NodeId>> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn create_nodes(
+            &mut self,
+            _placement: Placement,
+            _nodes: &[NewNodeRecord],
+        ) -> KernelResult<Vec<NodeId>> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn update_node_contents(&mut self, _updates: &[NodeUpdateRecord]) -> KernelResult<()> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn move_node(&mut self, _node_id: NodeId, _placement: Placement) -> KernelResult<()> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn delete_node(
+            &mut self,
+            _node_id: NodeId,
+            _mode: memoryroam_domain::DeleteMode,
+        ) -> KernelResult<()> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn add_aliases(&mut self, _node_id: NodeId, _aliases: &[AliasText]) -> KernelResult<()> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn remove_alias(&mut self, _node_id: NodeId, _alias: &AliasText) -> KernelResult<()> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn create_root_node(&mut self, _node: &NewNodeRecord) -> KernelResult<NodeId> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn create_daily_note_node(&mut self, _note_date: &str) -> KernelResult<NodeId> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
+
+        fn create_note_in_daily_note(
+            &mut self,
+            _note_date: &str,
+            _node: &NewNodeRecord,
+        ) -> KernelResult<NodeId> {
+            Err(KernelError::Storage(String::from("unused in test")))
+        }
     }
 
     #[test]
@@ -795,23 +970,32 @@ mod tests {
 
     #[test]
     fn create_root_reuses_existing_root_even_if_regular_note_shares_the_label() {
-        let mut store = store();
+        let root_id = NodeId::new(1).expect("valid test id");
+        let note_id = NodeId::new(2).expect("valid test id");
+        let mut repository = ConflictingRootRepository {
+            root: StoredNode {
+                id: root_id,
+                content: ContentLine::parse("Topic").expect("content should parse"),
+                parent_id: None,
+                first_child_id: None,
+                last_child_id: None,
+                prev_sibling_id: None,
+                next_sibling_id: None,
+            },
+            note: StoredNode {
+                id: note_id,
+                content: ContentLine::parse("Topic").expect("content should parse"),
+                parent_id: Some(NodeId::new(3).expect("valid test id")),
+                first_child_id: None,
+                last_child_id: None,
+                prev_sibling_id: None,
+                next_sibling_id: None,
+            },
+        };
 
-        let first = create_root(&mut store, "Topic").expect("root should be created");
-        let day_node_id = store
-            .create_daily_note_node("2026-04-11")
-            .expect("daily note should be created");
-        memoryroam_write::create_nodes(
-            &mut store,
-            "Topic",
-            &[],
-            Placement::LastChildOf(day_node_id),
-        )
-        .expect("low-level note create should succeed");
+        let reused = create_root(&mut repository, "Topic").expect("existing root should be reused");
 
-        let second = create_root(&mut store, "Topic").expect("existing root should be reused");
-
-        assert_eq!(first.root.id, second.root.id);
+        assert_eq!(reused.root.id, root_id);
     }
 
     #[test]
