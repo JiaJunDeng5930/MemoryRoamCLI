@@ -196,7 +196,10 @@ WHEN EXISTS (
         EXISTS (
         SELECT 1
         FROM nodes AS existing
+        LEFT JOIN daily_notes AS note
+          ON note.node_id = existing.id
         WHERE existing.id <> NEW.node_id
+          AND note.node_id IS NULL
           AND existing.content_lookup_key = incoming.content_lookup_key
     )
        OR EXISTS (
@@ -221,7 +224,10 @@ WHEN EXISTS (
 AND EXISTS (
     SELECT 1
     FROM nodes AS existing
+    LEFT JOIN daily_notes AS note
+      ON note.node_id = existing.id
     WHERE existing.id <> OLD.id
+      AND note.node_id IS NULL
       AND existing.content_lookup_key = NEW.content_lookup_key
     UNION ALL
     SELECT 1
@@ -2993,6 +2999,20 @@ mod tests {
             .create_root_node(&node_record(&store, "Topic"))
             .expect_err("root should reject alias-owned lookup key");
         assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn create_root_node_ignores_daily_note_date_nodes_for_lookup_ownership() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+
+        let root_id = store
+            .create_root_node(&node_record(&store, "2026-04-11"))
+            .expect("root should ignore daily note date nodes");
+        assert_eq!(root_id.value(), 2);
     }
 
     #[test]
