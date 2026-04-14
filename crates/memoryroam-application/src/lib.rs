@@ -5,8 +5,8 @@
 
 use chrono::NaiveDate;
 use memoryroam_domain::{
-    ContentFragment, ContentLine, IncomingLinkRecord, KernelError, KernelResult, NodeId, NodeLine,
-    ParsedLink, ReadRepository, StoredNode, canonicalize_content, parse_content,
+    ContentFragment, ContentLine, IncomingLinkRecord, KernelError, KernelResult, LookupKey, NodeId,
+    NodeLine, ParsedLink, ReadRepository, StoredNode, canonicalize_content, parse_content,
     render_storage_content,
 };
 use memoryroam_write::update_nodes;
@@ -120,6 +120,7 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     ensure_plain_text_root(&content)?;
     ensure_safe_root_label_text(content.as_str())?;
     ensure_referenceable_root_text(&content)?;
+    ensure_root_label_is_available(repository, &content)?;
     let search_text = normalized_root_lookup_text(&content);
     let mut rendered_matches = Vec::new();
     for node in repository.search_text_matches(search_text)? {
@@ -631,6 +632,22 @@ fn ensure_referenceable_root_text(content: &ContentLine) -> KernelResult<()> {
         .map_err(|error| KernelError::Input(error.to_string()))
 }
 
+fn ensure_root_label_is_available<R: ReadRepository>(
+    repository: &R,
+    content: &ContentLine,
+) -> KernelResult<()> {
+    let key = LookupKey::new(content.as_str().to_owned())
+        .map_err(|error| KernelError::Input(error.to_string()))?;
+    for candidate in repository.lookup_candidates(&key)? {
+        if !repository.is_root_node(candidate.node_id)? {
+            return Err(KernelError::Constraint(String::from(
+                "root label is already owned by a regular note",
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     let fragments =
         parse_content(content).map_err(|error| KernelError::Input(error.to_string()))?;
@@ -726,6 +743,17 @@ mod tests {
             create_root(&mut store, " Topic ").expect("second root should reuse the first root");
 
         assert_eq!(first.root.id, second.root.id);
+    }
+
+    #[test]
+    fn create_root_rejects_labels_owned_by_regular_notes() {
+        let mut store = store();
+
+        note_today(&mut store, "2026-04-11", "Topic").expect("note should be created");
+
+        let error = create_root(&mut store, "Topic")
+            .expect_err("root label owned by a regular note should be rejected");
+        assert!(matches!(error, KernelError::Constraint(_)));
     }
 
     #[test]
