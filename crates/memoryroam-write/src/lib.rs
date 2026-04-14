@@ -143,15 +143,7 @@ pub fn update_nodes<R: WriteRepository>(
             outgoing_links,
         };
 
-        let mut trial_updates = pending_updates.clone();
-        trial_updates.insert(*node_id, update.clone());
-        let cycle_repository = PendingUpdateRepository {
-            base: repository,
-            pending_updates: &trial_updates,
-        };
-        ensure_no_link_cycle(&cycle_repository, *node_id, &update.outgoing_links)?;
-
-        pending_updates = trial_updates;
+        pending_updates.insert(*node_id, update.clone());
         canonical_updates.push(update);
     }
 
@@ -159,6 +151,9 @@ pub fn update_nodes<R: WriteRepository>(
         base: repository,
         pending_updates: &pending_updates,
     };
+    for update in &canonical_updates {
+        ensure_no_link_cycle(&final_repository, update.node_id, &update.outgoing_links)?;
+    }
     ensure_unique_root_lookup_keys(&final_repository)?;
 
     repository.update_node_contents(&canonical_updates)
@@ -1098,6 +1093,41 @@ mod tests {
         assert_eq!(repository.updated.len(), 2);
         assert_eq!(repository.updated[0].1.as_str(), "New");
         assert_eq!(repository.updated[1].1.as_str(), "See {{1::topic}}");
+    }
+
+    #[test]
+    fn update_nodes_accept_atomic_cycle_breaking_rewrites() {
+        let mut repository = FakeRepository::default();
+        let first_id = NodeId::new(1).expect("valid test id");
+        let second_id = NodeId::new(2).expect("valid test id");
+        repository
+            .existing
+            .insert(first_id, stored_node(1, "Alpha"));
+        repository
+            .existing
+            .insert(second_id, stored_node(2, "Beta"));
+        repository
+            .aliases
+            .insert(String::from("Alpha"), vec![first_id]);
+        repository
+            .aliases
+            .insert(String::from("Beta"), vec![second_id]);
+        repository.outgoing.insert(second_id, vec![first_id]);
+
+        update_nodes(
+            &mut repository,
+            &[
+                (first_id, String::from("See {{Beta}}")),
+                (second_id, String::from("Beta revised")),
+            ],
+        )
+        .expect("final batch graph should be acyclic");
+
+        assert_eq!(repository.updated.len(), 2);
+        assert_eq!(repository.updated[0].1.as_str(), "See {{2::Beta}}");
+        assert_eq!(repository.updated[1].1.as_str(), "Beta revised");
+        assert_eq!(repository.updated[0].3, vec![second_id]);
+        assert!(repository.updated[1].3.is_empty());
     }
 
     #[test]
