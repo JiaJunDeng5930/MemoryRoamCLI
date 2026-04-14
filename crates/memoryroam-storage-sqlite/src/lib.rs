@@ -239,6 +239,37 @@ BEGIN
     SELECT RAISE(ABORT, 'duplicate root lookup key');
 END;
 
+CREATE TRIGGER IF NOT EXISTS child_nodes_reject_reserved_root_lookup_key_on_parent_update
+BEFORE UPDATE OF parent_id ON nodes
+FOR EACH ROW
+WHEN NEW.parent_id IS NOT NULL
+AND EXISTS (
+    SELECT 1
+    FROM root_nodes AS roots
+    JOIN nodes AS root_node
+      ON root_node.id = roots.node_id
+    WHERE root_node.content_lookup_key = NEW.content_lookup_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'reserved root lookup key');
+END;
+
+CREATE TRIGGER IF NOT EXISTS child_nodes_reject_reserved_root_lookup_key_on_update
+BEFORE UPDATE OF content_lookup_key ON nodes
+FOR EACH ROW
+WHEN NEW.parent_id IS NOT NULL
+AND EXISTS (
+    SELECT 1
+    FROM root_nodes AS roots
+    JOIN nodes AS root_node
+      ON root_node.id = roots.node_id
+    WHERE roots.node_id <> OLD.id
+      AND root_node.content_lookup_key = NEW.content_lookup_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'reserved root lookup key');
+END;
+
 CREATE TRIGGER IF NOT EXISTS daily_notes_validate_insert
 BEFORE INSERT ON daily_notes
 FOR EACH ROW
@@ -296,6 +327,21 @@ WHEN EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'daily note date nodes cannot have aliases');
+END;
+
+CREATE TRIGGER IF NOT EXISTS node_aliases_reject_reserved_root_lookup_key
+BEFORE INSERT ON node_aliases
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM root_nodes AS roots
+    JOIN nodes AS root_node
+      ON root_node.id = roots.node_id
+    WHERE roots.node_id <> NEW.node_id
+      AND root_node.content_lookup_key = NEW.alias_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'reserved root lookup key');
 END;
 
 CREATE TRIGGER IF NOT EXISTS node_aliases_reject_daily_note_delete
@@ -2742,21 +2788,30 @@ mod tests {
     fn batch_create_keeps_existing_lookup_candidates_visible() {
         let mut store = store();
         init(&mut store).expect("schema init should succeed");
-        store
-            .create_root_node(&node_record(&store, "Topic"))
-            .expect("root node should be created");
         let day_node_id = store
             .create_daily_note_node("2026-04-11")
             .expect("daily note node should be created");
-
-        let error = create_nodes(
+        let existing_topic_id = create_nodes(
             &mut store,
-            "Topic\nSee {{Topic}}",
+            "Topic",
             &[],
             Placement::LastChildOf(day_node_id),
         )
-        .expect_err("ambiguous lookup should fail");
-        assert!(matches!(error, KernelError::LookupAmbiguous { .. }));
+        .expect("existing note should be created")[0];
+
+        let created_ids = create_nodes(
+            &mut store,
+            "Other\nSee {{Topic}}",
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect("batch create should keep existing lookup candidates visible");
+
+        let dependent_view = read_node(&store, created_ids[1]).expect("read should succeed");
+        assert_eq!(
+            dependent_view.node.rendered_content,
+            format!("See {{{{{existing_topic_id}::Topic}}}}")
+        );
     }
 
     #[test]
@@ -3013,6 +3068,73 @@ mod tests {
             .create_root_node(&node_record(&store, "2026-04-11"))
             .expect("root should ignore daily note date nodes");
         assert_eq!(root_id.value(), 2);
+    }
+
+    #[test]
+    fn child_note_creation_rejects_reserved_root_lookup_keys() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+
+        let error = create_nodes(
+            &mut store,
+            "Topic",
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect_err("child note should reject reserved root key");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn child_note_update_rejects_reserved_root_lookup_keys() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        let child_id = create_nodes(
+            &mut store,
+            "Other",
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect("child note should be created")[0];
+
+        let error = update_node(&mut store, child_id, "Topic")
+            .expect_err("child note update should reject reserved root key");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn alias_creation_rejects_reserved_root_lookup_keys() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect("root should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        let child_id = create_nodes(
+            &mut store,
+            "Other",
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect("child note should be created")[0];
+
+        let error = add_aliases(&mut store, child_id, &[String::from("Topic")])
+            .expect_err("alias should reject reserved root key");
+        assert!(matches!(error, KernelError::Constraint(_)));
     }
 
     #[test]
