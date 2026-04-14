@@ -120,7 +120,6 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     ensure_plain_text_root(&content)?;
     ensure_safe_root_label_text(content.as_str())?;
     ensure_referenceable_root_text(&content)?;
-    ensure_root_label_is_available(repository, &content)?;
     let search_text = normalized_root_lookup_text(&content);
     let mut rendered_matches = Vec::new();
     for node in repository.search_text_matches(search_text)? {
@@ -137,6 +136,7 @@ pub fn create_root<R: ReadRepository + memoryroam_domain::WriteRepository>(
     let root = match repository.find_root_node_by_content(&content)? {
         Some(node) => node,
         None => {
+            ensure_root_label_is_available(repository, &content)?;
             let node = build_root_node(repository, &content)?;
             match repository.create_root_node(&node) {
                 Ok(node_id) => {
@@ -638,14 +638,13 @@ fn ensure_root_label_is_available<R: ReadRepository>(
 ) -> KernelResult<()> {
     let key = LookupKey::new(content.as_str().to_owned())
         .map_err(|error| KernelError::Input(error.to_string()))?;
-    for candidate in repository.lookup_candidates(&key)? {
-        if !repository.is_root_node(candidate.node_id)? {
-            return Err(KernelError::Constraint(String::from(
-                "root label is already owned by a regular note",
-            )));
-        }
+    if repository.lookup_candidates(&key)?.is_empty() {
+        return Ok(());
     }
-    Ok(())
+
+    Err(KernelError::Constraint(String::from(
+        "root label is already owned by another node",
+    )))
 }
 
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
@@ -686,7 +685,7 @@ mod tests {
         Placement, StoredNode, WriteRepository,
     };
     use memoryroam_storage_sqlite::SqliteStore;
-    use memoryroam_write::init;
+    use memoryroam_write::{add_aliases, init};
     use tempfile::NamedTempFile;
 
     fn store() -> SqliteStore {
@@ -753,6 +752,30 @@ mod tests {
 
         let error = create_root(&mut store, "Topic")
             .expect_err("root label owned by a regular note should be rejected");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn create_root_reuses_existing_root_even_if_regular_note_shares_the_label() {
+        let mut store = store();
+
+        let first = create_root(&mut store, "Topic").expect("root should be created");
+        note_today(&mut store, "2026-04-11", "Topic").expect("note should be created");
+
+        let second = create_root(&mut store, "Topic").expect("existing root should be reused");
+
+        assert_eq!(first.root.id, second.root.id);
+    }
+
+    #[test]
+    fn create_root_rejects_labels_owned_by_root_aliases() {
+        let mut store = store();
+        let root = create_root(&mut store, "Alias owner").expect("root should be created");
+        add_aliases(&mut store, root.root.id, &[String::from("Topic")])
+            .expect("alias should be added");
+
+        let error =
+            create_root(&mut store, "Topic").expect_err("root alias should reserve the label");
         assert!(matches!(error, KernelError::Constraint(_)));
     }
 
