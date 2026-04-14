@@ -73,9 +73,12 @@ fn cli_empty_today_hint_preserves_selected_database() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "use: memoryroam --db '{}' note \"...\"",
+            "database path: {}",
             database_path.display()
-        )));
+        )))
+        .stdout(predicate::str::contains(
+            "use: memoryroam --db <database-path> note \"...\"",
+        ));
 }
 
 #[test]
@@ -92,9 +95,12 @@ fn cli_empty_today_hint_quotes_database_paths_with_spaces() {
     day.assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "use: memoryroam --db '{}' note \"...\"",
+            "database path: {}",
             database_path.display()
-        )));
+        )))
+        .stdout(predicate::str::contains(
+            "use: memoryroam --db <database-path> note \"...\"",
+        ));
 }
 
 #[test]
