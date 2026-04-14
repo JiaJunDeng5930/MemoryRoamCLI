@@ -78,6 +78,7 @@ pub fn note_today<R: ReadRepository + memoryroam_domain::WriteRepository>(
 ) -> KernelResult<NoteResult> {
     validate_day_date(note_date, "invalid daily note date")?;
     let node = build_new_node(repository, raw_content)?;
+    ensure_note_lookup_key_is_available(repository, &node.lookup_key)?;
     let rendered_content = render_storage_content(repository, &node.content)?;
     let node_id = repository.create_note_in_daily_note(note_date, &node)?;
     let created = repository
@@ -647,6 +648,20 @@ fn ensure_root_label_is_available<R: ReadRepository>(
     )))
 }
 
+fn ensure_note_lookup_key_is_available<R: ReadRepository>(
+    repository: &R,
+    lookup_key: &LookupKey,
+) -> KernelResult<()> {
+    for candidate in repository.lookup_candidates(lookup_key)? {
+        if repository.is_root_node(candidate.node_id)? {
+            return Err(KernelError::Constraint(String::from(
+                "note content cannot reuse a root label",
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_plain_text_root(content: &ContentLine) -> KernelResult<()> {
     let fragments =
         parse_content(content).map_err(|error| KernelError::Input(error.to_string()))?;
@@ -745,6 +760,29 @@ mod tests {
     }
 
     #[test]
+    fn note_today_rejects_content_that_reuses_root_labels() {
+        let mut store = store();
+
+        create_root(&mut store, "Topic").expect("root should be created");
+
+        let error = note_today(&mut store, "2026-04-11", "Topic")
+            .expect_err("note should reject root-owned lookup key");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn note_today_rejects_content_that_reuses_root_aliases() {
+        let mut store = store();
+        let root = create_root(&mut store, "Alias owner").expect("root should be created");
+        add_aliases(&mut store, root.root.id, &[String::from("Topic")])
+            .expect("alias should be added");
+
+        let error = note_today(&mut store, "2026-04-11", "Topic")
+            .expect_err("note should reject root alias-owned lookup key");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
     fn create_root_rejects_labels_owned_by_regular_notes() {
         let mut store = store();
 
@@ -760,7 +798,16 @@ mod tests {
         let mut store = store();
 
         let first = create_root(&mut store, "Topic").expect("root should be created");
-        note_today(&mut store, "2026-04-11", "Topic").expect("note should be created");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note should be created");
+        memoryroam_write::create_nodes(
+            &mut store,
+            "Topic",
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect("low-level note create should succeed");
 
         let second = create_root(&mut store, "Topic").expect("existing root should be reused");
 
