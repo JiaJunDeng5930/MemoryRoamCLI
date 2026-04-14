@@ -190,12 +190,21 @@ BEFORE INSERT ON root_nodes
 FOR EACH ROW
 WHEN EXISTS (
     SELECT 1
-    FROM root_nodes AS r
-    JOIN nodes AS existing
-      ON existing.id = r.node_id
-    JOIN nodes AS incoming
-      ON incoming.id = NEW.node_id
-    WHERE existing.content_lookup_key = incoming.content_lookup_key
+    FROM nodes AS incoming
+    WHERE incoming.id = NEW.node_id
+      AND (
+        EXISTS (
+        SELECT 1
+        FROM nodes AS existing
+        WHERE existing.id <> NEW.node_id
+          AND existing.content_lookup_key = incoming.content_lookup_key
+    )
+       OR EXISTS (
+        SELECT 1
+        FROM node_aliases AS aliases
+        WHERE aliases.node_id <> NEW.node_id
+          AND aliases.alias_key = incoming.content_lookup_key
+    ))
 )
 BEGIN
     SELECT RAISE(ABORT, 'duplicate root lookup key');
@@ -211,11 +220,14 @@ WHEN EXISTS (
 )
 AND EXISTS (
     SELECT 1
-    FROM root_nodes AS r
-    JOIN nodes AS existing
-      ON existing.id = r.node_id
-    WHERE r.node_id <> OLD.id
+    FROM nodes AS existing
+    WHERE existing.id <> OLD.id
       AND existing.content_lookup_key = NEW.content_lookup_key
+    UNION ALL
+    SELECT 1
+    FROM node_aliases AS aliases
+    WHERE aliases.node_id <> OLD.id
+      AND aliases.alias_key = NEW.content_lookup_key
 )
 BEGIN
     SELECT RAISE(ABORT, 'duplicate root lookup key');
@@ -2944,6 +2956,43 @@ mod tests {
             .create_root_node(&bad_root)
             .expect_err("invalid root should fail");
         assert!(matches!(error, KernelError::Input(_)));
+    }
+
+    #[test]
+    fn create_root_node_rejects_lookup_keys_owned_by_regular_notes() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        let day_node_id = store
+            .create_daily_note_node("2026-04-11")
+            .expect("daily note node should be created");
+        create_nodes(
+            &mut store,
+            "Topic",
+            &[],
+            Placement::LastChildOf(day_node_id),
+        )
+        .expect("note should be created");
+
+        let error = store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect_err("root should reject note-owned lookup key");
+        assert!(matches!(error, KernelError::Constraint(_)));
+    }
+
+    #[test]
+    fn create_root_node_rejects_lookup_keys_owned_by_aliases() {
+        let mut store = store();
+        init(&mut store).expect("schema init should succeed");
+        let owner_id = store
+            .create_root_node(&node_record(&store, "Alias owner"))
+            .expect("root should be created");
+        add_aliases(&mut store, owner_id, &[String::from("Topic")])
+            .expect("alias add should succeed");
+
+        let error = store
+            .create_root_node(&node_record(&store, "Topic"))
+            .expect_err("root should reject alias-owned lookup key");
+        assert!(matches!(error, KernelError::Constraint(_)));
     }
 
     #[test]
