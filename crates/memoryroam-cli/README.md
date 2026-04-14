@@ -50,6 +50,38 @@ Show help:
 cargo run --bin memoryroam -- --help
 ```
 
+Quick start with an installed binary:
+
+```bash
+memoryroam --db notes.sqlite3 init
+memoryroam --db notes.sqlite3 note "Check the scope of issue 7"
+memoryroam --db notes.sqlite3 note "Design the root relink workflow"
+memoryroam --db notes.sqlite3 day
+memoryroam --db notes.sqlite3 read 2
+```
+
+The sample IDs in this sequence assume a brand-new database file.
+
+Equivalent quick start from a source checkout:
+
+```bash
+cargo run --bin memoryroam -- --db notes.sqlite3 init
+cargo run --bin memoryroam -- --db notes.sqlite3 note "Check the scope of issue 7"
+cargo run --bin memoryroam -- --db notes.sqlite3 note "Design the root relink workflow"
+cargo run --bin memoryroam -- --db notes.sqlite3 day
+cargo run --bin memoryroam -- --db notes.sqlite3 read 2
+```
+
+Root-link workflow on a fresh database:
+
+```bash
+memoryroam --db notes.sqlite3 init
+memoryroam --db notes.sqlite3 note "Software engineering is a branch of engineering"
+memoryroam --db notes.sqlite3 note "Software engineering emerged in the 1960s"
+memoryroam --db notes.sqlite3 root create "Software engineering"
+memoryroam --db notes.sqlite3 root apply 4 --node 2 --node 3
+```
+
 Initialize a database:
 
 ```bash
