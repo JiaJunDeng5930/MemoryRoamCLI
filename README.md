@@ -74,6 +74,54 @@ All non-`init` commands require an existing database file.
 If the file does not exist, the command fails instead of silently creating an empty database.
 This unreleased branch does not provide schema migration or backward compatibility for older database files.
 
+## Quick Start
+
+Create a database file:
+
+```bash
+memoryroam --db notes.sqlite3 init
+```
+
+Write two notes into today's daily note:
+
+```bash
+memoryroam --db notes.sqlite3 note "Check the scope of issue 7"
+memoryroam --db notes.sqlite3 note "Design the root relink workflow"
+```
+
+Open today's daily note:
+
+```bash
+memoryroam --db notes.sqlite3 day
+```
+
+Read one note with its surrounding context:
+
+```bash
+memoryroam --db notes.sqlite3 read 2
+```
+
+Write two notes that mention one concept:
+
+```bash
+memoryroam --db notes.sqlite3 note "Software engineering is a branch of engineering"
+memoryroam --db notes.sqlite3 note "Software engineering emerged in the 1960s"
+```
+
+Create one root node and list matching notes:
+
+```bash
+memoryroam --db notes.sqlite3 root create "Software engineering"
+```
+
+Rewrite selected notes to link to that root node:
+
+```bash
+memoryroam --db notes.sqlite3 root apply 4 --node 5 --node 6
+```
+
+This workflow assumes a brand-new database, so the sample IDs above are stable in a fresh file.
+
 ## Common Tasks
 
 Capture a note into today's daily note:
